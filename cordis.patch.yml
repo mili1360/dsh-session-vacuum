@@ -1,0 +1,28 @@
+# ============================================================================
+# dsh-session-vacuum —— DSH bundle patch（挂载声明）
+#
+# 干什么：会话日志里堆积着海量流式碎片（assistant/chunk 与三种打包行）。
+#   它们在 assistant/message 定稿后就没有任何用途 —— 回放不看、喂模型不读 ——
+#   但只写不删。一个 1813 轮的会话是 22.4 万行 / 272 MB，加载时展开成
+#   843 万个对象 / 1.29 GB 常驻，最后 OOM。
+#   本插件在启动后扫一遍 sessions\，把碎片清掉，让【以后每次加载都是小文件】。
+#
+# ★ 不碰 node_modules —— 纯插件。这也是为什么没走"改加载器"那条路。
+#
+# ★ 安全默认：enabled=false + dryRun=true
+#   装上什么都不做，连定时器都不起；开了之后也只在日志里记"本来能省多少"。
+#   日志：$DSH_HOME/logs/session-vacuum.jsonl
+#   要真开：建 $DSH_HOME/dsh-session-vacuum/config.json
+#          写入 {"enabled":true,"dryRun":false}   （热读，不用重启）
+#
+# 安全设计：只处理最近没被动过的文件（绝不在 DSH 写文件时换）；
+#   改前建 .orig 且永不删；只在碎片超标时动手；改完自校验不过就不换；
+#   串行 + 每文件让出事件循环。
+#
+# ⚠️ 需要重启 DSH 才加载
+# ⚠️ 万一 DSH 起不来：把下面两行删掉即可
+# ============================================================================
+
+- insert:
+    - id: session-vacuum
+      name: 'file:///path/to/dsh-session-vacuum/lib/index.js'

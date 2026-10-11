@@ -1,0 +1,48 @@
+{
+  "name": "dsh-session-vacuum",
+  "version": "0.1.0",
+  "description": "Prune the dead streaming fragments out of DSH session logs at startup, so a long session stops expanding into gigabytes when it is loaded. Destructive by design; inert and dry-run by default.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "session",
+    "maintenance",
+    "zstd",
+    "memory"
+  ],
+  "license": "MIT",
+  "author": "三文鱼",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mili1360/dsh-session-vacuum.git"
+  },
+  "homepage": "https://github.com/mili1360/dsh-session-vacuum#readme",
+  "bugs": {
+    "url": "https://github.com/mili1360/dsh-session-vacuum/issues"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=22.15.0"
+  },
+  "scripts": {
+    "test": "node test/vacuum-tests.mjs",
+    "test:vacuum": "node test/vacuum-tests.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
