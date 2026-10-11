@@ -34,35 +34,42 @@ readable by decompressing its zstd frames and parsing every JSONL line.
   log.
 - **Inert and dry by default.** `enabled: false` / `dryRun: true`: a fresh install starts no
   timer at all, and turning it on still only logs what it *would* save.
-- **Offline test suite** (`test/vacuum-tests.mjs`, 18 cases) that never touches the real
+- **Offline test suite** (`test/vacuum-tests.mjs`, 20 cases) that never touches the real
   `DSH_HOME`: chunk-row detection including the `chunk-stub` non-match, both thresholds, the
   live-file window, the existing-`.orig` behaviour, the prune and its remapping, the verify
-  gate, `dryRun`, the real run, and a re-read of the rewritten log.
+  gate, `dryRun`, the real run, a re-read of the rewritten log, and the two frame-boundary
+  regressions below.
+
+### Fixed
+
+- **Frame boundaries were found by scanning for the zstd magic, which truncated silently.**
+  `decompressFrames()` sliced each frame up to the next `28 b5 2f fd`. Those four bytes can
+  occur *inside* a frame's payload, and `zlib.zstdDecompressSync` does not throw on a
+  mis-sliced frame — it returns an empty buffer — so the cut landed on a clean line boundary,
+  the truncated row set still parsed, still passed `verifyPruned()`, and the live log was
+  replaced by it with status `vacuumed`. Repro before the fix: a synthetic 661-row log read
+  back as 200 rows and was rewritten to 38. The walker now parses the frame header and every
+  block header (RFC 8878), so no payload byte can be mistaken for a boundary; whatever it
+  cannot account for is reported as `truncated`, and `vacuumOne()` answers `unreadable-tail`
+  and writes nothing. Cross-checked against an independent decoder on two real logs
+  (19,938 and 44 frames, both consumed to the last byte, neither truncated). Two regression
+  tests cover it, and both go red when the old rule is restored.
+- **The dead `.orig` guard is gone.** `if (fs.existsSync(file + '.orig') && cfg.skipIfBackedUp !== false) { }`
+  had an empty body and `skipIfBackedUp` was never a default. Removing it makes the actual
+  behaviour explicit instead of implying a skip that never happened; a test pins the guarantee
+  that does exist — the first backup is never overwritten.
+- **`verify-failed` now reports `chunks`**, like every other refusal path.
 
 ### Known issues
 
-Found while writing the test suite and the documentation. Reported rather than papered over;
-none of them are fixed in this release.
+Found while writing the test suite and the documentation. Reported rather than papered over.
 
-- **A stray zstd magic sequence silently truncates the log that gets written.**
-  `decompressFrames()` finds frame boundaries by scanning for `28 b5 2f fd`. If those four
-  bytes occur *inside* a frame's payload, the scan produces a bogus boundary, the following
-  slice fails to decompress, and the decode loop stops there — returning a *truncated* text
-  with no error. `vacuumOne()` then prunes what it got, passes self-verification (the cut
-  lands on a frame boundary, so every remaining line parses), and replaces the live log with
-  the truncated version. Reproduced: a synthetic 661-row log reads back as 200 rows and is
-  rewritten to 38 rows with status `vacuumed`. `.orig` still holds the original bytes, so it
-  is recoverable, but the plugin reports success.
-- **`.orig` never establishes a skip.** The guard
-  `if (fs.existsSync(file + '.orig') && cfg.skipIfBackedUp !== false) { }` has an empty body,
-  and `skipIfBackedUp` is not part of `DEFAULTS`. A session that has already been vacuumed is
-  therefore processed again on every run; the implemented and tested guarantee is only that
-  the *first* backup is never overwritten.
+- **`.orig` deliberately does not establish a skip.** Skipping on the mere presence of the
+  backup would maintain a session only once, because `.orig` is never removed. Every run
+  re-evaluates the thresholds instead.
 - **`minIntervalMs` is documented but dead.** It is declared in `DEFAULTS` (six hours) and
   read nowhere: maintenance is a one-shot `setTimeout` per boot, so there is no second run for
   an interval to gate.
-- **`verify-failed` log lines omit `chunks`.** `below-threshold`, `would-vacuum` and
-  `vacuumed` all report how many fragment rows were seen; the refusal path does not.
 - **`beforeMB` / `afterMB` are rounded to two decimals**, so for small logs both read `0.0`
   and the logged saving is meaningless. It is exact for the multi-megabyte logs this plugin
   exists for.

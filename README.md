@@ -261,16 +261,19 @@ exits non-zero if anything failed.
 
 ## Known limitations
 
-- **A stray zstd magic sequence silently truncates the log.** Frame boundaries are found by
-  scanning for `28 b5 2f fd`; if those bytes occur inside a frame's payload, the decode stops
-  early and returns a *truncated* text with no error — and the truncated result passes
-  self-verification, because the cut lands on a frame boundary. Reproduced with a synthetic
-  661-row log: 200 rows were read, and the live log was rewritten to 38 rows with status
-  `vacuumed`. `.orig` keeps the original bytes, so it is recoverable, but the plugin reports
-  success. Reported, not fixed, in this release — see `CHANGELOG.md`.
-- **A session is not skipped because a `.orig` exists.** The guard is present in the source
-  with an empty body, so an already-vacuumed session is re-processed on every run. The
-  implemented guarantee is narrower: the first backup is never overwritten.
+- **Frame boundaries come from the frame structure, not from a magic-byte scan.** An earlier
+  revision of this file sliced each frame up to the next `28 b5 2f fd`. Those four bytes can
+  occur inside a frame's payload; Node's `zstdDecompressSync` does not throw on a mis-sliced
+  frame (it returns an empty buffer), so the cut landed on a clean line boundary and the
+  *truncated* row set still parsed and still passed self-verification — a 661-row synthetic
+  log was read back as 200 rows and rewritten to 38 with status `vacuumed`. The walker now
+  parses the frame header and every block header, and any bytes it cannot account for are
+  reported as `truncated`, which makes `vacuumOne()` return `unreadable-tail` and write
+  nothing. Two regression tests cover it; under the old rule both go red.
+- **A session is not skipped because a `.orig` exists — deliberately.** Skipping on the mere
+  presence of the backup would maintain a session only once, because `.orig` is never
+  removed. Every run re-evaluates the thresholds instead. The guarantee that does exist:
+  the first backup is never overwritten.
 - **`minIntervalMs` does nothing.** Maintenance runs once per boot; there is no second run.
 - **Only one file at a time, and at most `maxFilesPerRun` per boot.** A directory with many
   oversized logs is cleaned up over several restarts.

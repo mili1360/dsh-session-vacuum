@@ -554,6 +554,66 @@ await test('runVacuum scans $DSH_HOME/sessions, honours maxFilesPerRun and logs 
   assert.equal(fs.existsSync(path.join(tmp, 'sessions', 's1', 'session.jsonl.zstd.vacuum-tmp')), false)
 })
 
+// ---------------------------------------------------------------- frame boundaries
+
+// REGRESSION (2026-10-11). Frame boundaries used to be found by scanning for the four
+// magic bytes 28 b5 2f fd. Those bytes can occur INSIDE a frame's payload, and the mix-up
+// was silent: zstdDecompressSync does not throw on a mis-sliced frame, it returns an empty
+// buffer, so the cut landed on a clean line boundary, the truncated row set still parsed,
+// still passed verifyPruned(), and the live log was replaced by it with status `vacuumed`.
+// Reproduced before the fix: 661 rows read back as 200 and rewritten to 38.
+await test('a bogus magic sequence stops the walk instead of cutting a real frame in half', async () => {
+  const dir = caseDir('stray-magic')
+  const file = path.join(dir, 'session.jsonl.zstd')
+  const { rows } = buildRows()
+  writeLog(file, rows, Date.now() - 60 * 60 * 1000)
+  const clean = fs.readFileSync(file)
+  const cleanText = plugin.decompressFrames(clean).text
+
+  // Splice a magic-looking region in front of a real frame in the middle of the file: this
+  // is exactly the shape a false positive inside a payload used to produce.
+  const starts = frameStarts(clean)
+  assert.ok(starts.length >= 4, 'fixture needs several frames for this case')
+  const at = starts[Math.floor(starts.length / 2)]
+  const junk = Buffer.concat([ZSTD_MAGIC, Buffer.alloc(24, 0x5a)])
+  const injected = Buffer.concat([clean.subarray(0, at), junk, clean.subarray(at)])
+
+  const got = plugin.decompressFrames(injected)
+  assert.equal(got.truncated, true, 'the walk must admit it could not get to the end')
+  assert.ok(got.trailingBytes > junk.length, 'everything from the bogus region on is unread')
+  assert.ok(got.text.length < cleanText.length, 'it must not pretend the whole file was read')
+  assert.equal(cleanText.startsWith(got.text), true, 'what it did read must be a clean prefix')
+})
+
+await test('a truncated tail makes vacuumOne refuse instead of rewriting a half-read log', async () => {
+  const dir = caseDir('truncated-tail')
+  const file = path.join(dir, 'session.jsonl.zstd')
+  const { rows, chunkRows } = buildRows()
+  writeLog(file, rows, Date.now() - 60 * 60 * 1000)
+
+  // Sanity: this fixture does qualify, so the refusal below is the tail guard talking and
+  // not one of the thresholds.
+  assert.ok(chunkRows >= CFG.minChunkRows)
+
+  const whole = fs.readFileSync(file)
+  // Cut in the middle of the LAST frame, the shape a crash mid-append leaves behind.
+  const starts = frameStarts(whole)
+  const lastStart = starts[starts.length - 1]
+  fs.writeFileSync(file, whole.subarray(0, lastStart + 4))
+  // Backdate: writing the file just now would make it "live", and an NTFS mtime can sit a
+  // fraction of a millisecond ahead of Date.now(), so liveWindowMs 0 is not enough.
+  const past = (Date.now() - 60 * 60 * 1000) / 1000
+  fs.utimesSync(file, past, past)
+  const after = fs.readFileSync(file)
+
+  assert.equal(plugin.decompressFrames(after).truncated, true)
+  const r = plugin.vacuumOne(file, { ...CFG, dryRun: false })
+  assert.equal(r.status, 'unreadable-tail')
+  assert.ok(r.trailingBytes > 0)
+  assert.deepEqual(fs.readFileSync(file), after, 'a half-read log must never be rewritten')
+  assert.equal(fs.existsSync(file + '.orig'), false, 'nothing may be backed up for a log we refused')
+})
+
 // ---------------------------------------------------------------- teardown
 
 fs.rmSync(tmp, { recursive: true, force: true })
