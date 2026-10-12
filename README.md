@@ -74,6 +74,32 @@ The plugin cannot shrink an already-loaded session — it does not need to. Prun
 means every *future* load is small, which is where the memory, the stutter and the OOM came
 from.
 
+## How this differs from the runtime approaches
+
+The same dead weight has a second, complementary fix: trim it at **read time** instead of at
+**rest**. [dsh-host-history-lite](https://github.com/GithungDang/dsh-host-history-lite)
+intercepts the `session.history` / `subagent.history` RPC routes and folds finalised chunk
+deltas back into the final `assistant/message` before the response leaves the server. Both
+tools attack the same rows; they sit at different layers, and they can be used together.
+
+| | dsh-session-vacuum (this) | runtime slimming |
+|---|---|---|
+| Where | the session log **on disk** | the **RPC response** |
+| When | once per boot, while the session is idle | on every history request |
+| What happens to the data | **deleted** — `.orig` is the only backup | kept; just not sent to the client |
+| Saves | disk, load time, and the memory a load expands into | transfer size and client parse time |
+| Reversible | no | yes, at any time |
+| Who benefits | every reader of the log, and every future load | `dsh web` clients only |
+| Other tools reading the log | see the smaller log | unaffected |
+
+Pick by what hurts: a `sessions/` directory that keeps growing and a load that expands into
+gigabytes → this plugin. A history panel that takes seconds to open → the runtime approach.
+
+> **A note on "nothing reads them".** That is true on the *server*: the fragments are not part
+> of the surface the model is sent, and no server-side projection reads them back. The
+> **client** does replay them when it opens a finished conversation — which is exactly why the
+> runtime approaches can drop them without changing what a finished conversation looks like.
+
 ## Install
 
 This is a plugin for a DSH profile. Add it to the profile — the same layer every other DSH
