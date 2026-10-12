@@ -1,5 +1,12 @@
 # dsh-session-vacuum（中文说明）
 
+[![dsh-plugin](https://img.shields.io/badge/dsh--plugin-community%20topic-blue)](https://github.com/topics/dsh-plugin)
+[![deepseek-harness](https://img.shields.io/badge/deepseek--harness-plugin-4b6bfb)](https://github.com/topics/deepseek-harness)
+[![license: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
+> **Topics:** `dsh-plugin` · `deepseek-harness` · `session-log` · `streaming-fragments` ·
+> `vacuum` · `prune` · `oom` · `long-session` · `memory-optimization`
+
 > 英文主文档见 [README.md](README.md)。代码注释保持中文，本文件是完整的对照说明。
 
 DSH 插件：开机后扫一遍会话日志，把**已经没人读的流式碎片行**删掉，

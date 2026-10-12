@@ -3,13 +3,16 @@
   "version": "0.1.0",
   "description": "Prune the dead streaming fragments out of DSH session logs at startup, so a long session stops expanding into gigabytes when it is loaded. Destructive by design; inert and dry-run by default.",
   "keywords": [
-    "dsh",
     "dsh-plugin",
     "deepseek-harness",
-    "session",
-    "maintenance",
-    "zstd",
-    "memory"
+    "session-log",
+    "streaming-fragments",
+    "vacuum",
+    "prune",
+    "oom",
+    "long-session",
+    "memory-optimization",
+    "zstd"
   ],
   "license": "MIT",
   "author": "三文鱼",

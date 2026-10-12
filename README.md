@@ -1,5 +1,12 @@
 # dsh-session-vacuum
 
+[![dsh-plugin](https://img.shields.io/badge/dsh--plugin-community%20topic-blue)](https://github.com/topics/dsh-plugin)
+[![deepseek-harness](https://img.shields.io/badge/deepseek--harness-plugin-4b6bfb)](https://github.com/topics/deepseek-harness)
+[![license: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
+> **Topics:** `dsh-plugin` · `deepseek-harness` · `session-log` · `streaming-fragments` ·
+> `vacuum` · `prune` · `oom` · `long-session` · `memory-optimization`
+
 A [DSH](https://github.com/deepseek-ai/deepseek-harness) plugin that prunes the **dead
 streaming fragments** out of session logs at startup, so a long session stops expanding into
 gigabytes of objects every time it is loaded.
