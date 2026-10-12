@@ -132,6 +132,34 @@ DSH 插件：开机后扫一遍会话日志，把**已经没人读的流式碎�
 > 更老的运行时它**什么都干不了**（解压调用失败 ⇒ 数不到碎片行 ⇒ 全部报 `below-threshold`）✓
 > 也就是「做不了」而不是「做错」✓
 
+## 要求 / 兼容性
+
+**装上之后要确认它真的在工作** ✓ 光"profile 起得来"不算数 ✗
+插件可能加载得好好的、路由也活着，却把宿主弄坏 —— 我们真踩过 ✓
+验收动作: **新建一个会话、发一条消息** ✓
+然后看 `$DSH_HOME/logs/session-vacuum.jsonl` 里有没有一对 `run-start` / `run-end`
+（开机后约 `startDelayMs` 出现）✓
+如果连新会话都建不出来 ⇒ 把上面那行挂载删掉、重启 ✓
+
+针对 **DSH `0.1.0-rc.7`** 开发并测试 —— 这是一个**魔改版**，不是官方原版。别的版本可能把服务
+名改掉：本插件只用到 `ctx.effect` 这一项宿主服务。
+
+版本对不上时，插件**不会**让 profile 起不来 ✓ 它会直接**停用**：不定时器、不碰任何会话日志，
+只在 `logs/session-vacuum.jsonl` 里留一行：
+
+```json
+{"mark":"deactivated","reason":"registration-failed","step":"services","error":"..."}
+```
+
+**万一装上之后 profile 根本起不来**：把 `<profile>/cordis.patch.yml` 里挂载它的那几行删掉
+（若你是用 `dsh.profile.bundles` 装的，就把数组里的 `"dsh-session-vacuum"` 去掉），然后重启：
+
+```yaml
+- insert:
+    - id: session-vacuum
+      name: 'file:///path/to/dsh-session-vacuum/lib/index.js'
+```
+
 ## 配置
 
 文件：`$DSH_HOME/dsh-session-vacuum/config.json`（默认 `~/.dsh/…`）✓
@@ -244,7 +272,7 @@ npm run test:vacuum
 全离线 ✓ 不碰 DSH ✓ 不联网 ✓ 不需要 API key ✓
 `process.env.DSH_HOME` 在**导入插件之前**就被指到 `os.tmpdir()` 下的临时目录 ✓
 测试里的每一份日志都是本地合成的 ✓
-跑完打印 `18 passed, 0 failed`，有任何失败**退出码非零** ✓
+跑完打印 `21 passed, 0 failed`，有任何失败**退出码非零** ✓
 
 | 范围 | 项数 | 覆盖 |
 |---|---|---|
@@ -258,6 +286,7 @@ npm run test:vacuum
 | 真跑 | 3 | 日志被替换且更小、`.orig` 逐字节一致、不留临时文件；结果**逐帧重读**并逐行解析，事件数量与顺序都与原样一致 ✓ |
 | 坏输入 | 2 | 不是 zstd 的文件、以及 JSON 撕裂的日志：只报告，绝不重写 ✓ |
 | 发现与启动 | 2 | 递归只找 `session.jsonl.zstd`；`runVacuum` 会扫、会遵守 `maxFilesPerRun`、会逐文件记日志，而且 dry-run 下不动文件 ✓ |
+| 注册 | 1 | 上下文不兼容时（`effect` 抛异常 / 没有 `effect` / `ctx` 是 `null`）：`apply()` 正常返回、每次失败正好记一行 `deactivated`、不定任何定时器；而正常 `ctx` 下照旧挂上定时器 ✓ |
 
 > **给贡献者**：`test()` **必须 `await fn()`** ✗
 > 同步的框架会在任何 async 断言执行之前就打 `ok`，并且让脚本先走到退出那一行

@@ -614,6 +614,62 @@ await test('a truncated tail makes vacuumOne refuse instead of rewriting a half-
   assert.equal(fs.existsSync(file + '.orig'), false, 'nothing may be backed up for a log we refused')
 })
 
+// ---------------------------------------------------------------- hostile contexts
+
+// A plugin that is merely INCOMPATIBLE with the build it was loaded into must not take the
+// whole profile down with it. The proven failure was a third-party plugin
+// (cancanqiqi/dsh-human-subagent) calling a service method this build does not have: the
+// exception left apply() and the loader refused to start the entire profile. The same shape
+// of incompatibility must cost THIS plugin its own activation and nothing else.
+await test('apply() returns normally when the context is hostile, and records the deactivation', async () => {
+  const configFile = path.join(tmp, 'dsh-session-vacuum', 'config.json')
+  const logFile = path.join(tmp, 'logs', 'session-vacuum.jsonl')
+  // startDelayMs is short on purpose: if a hostile apply() ever left its timer armed, the
+  // scan below would show up as a run-start line and the case would fail.
+  fs.writeFileSync(configFile, JSON.stringify({ enabled: true, startDelayMs: 300, dryRun: true }))
+  fs.rmSync(logFile, { force: true })
+
+  const logged = () => fs.readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+
+  const hostile = [
+    { label: 'ctx.effect throws', step: 'ctx.effect', ctx: { effect() { throw new Error('boom-effect') } } },
+    { label: 'ctx.effect absent', step: 'services', ctx: {} },
+    { label: 'ctx is null', step: 'services', ctx: null },
+  ]
+
+  let seen = 0
+  for (const h of hostile) {
+    let threw = null
+    try {
+      plugin.apply(h.ctx)
+    } catch (err) {
+      threw = err
+    }
+    assert.equal(threw, null, 'apply() must NOT throw with a hostile ctx: ' + h.label)
+    const lines = logged().filter((l) => l.mark === 'deactivated')
+    assert.equal(lines.length, seen + 1, 'each hostile ctx must leave exactly ONE deactivation line: ' + h.label)
+    assert.equal(lines[lines.length - 1].reason, 'registration-failed', h.label)
+    assert.equal(lines[lines.length - 1].step, h.step, 'the log must name the step that failed: ' + h.label)
+    seen = lines.length
+  }
+
+  // "Deactivated" has to mean deactivated: no timer may survive, so nothing may run.
+  await new Promise((resolve) => setTimeout(resolve, 700))
+  assert.deepEqual(logged().filter((l) => l.mark === 'run-start'), [], 'a deactivated plugin must not scan anything')
+
+  // And with ctx.effect present the very same apply() still mounts the timer and hands the
+  // host a disposer: the guard is a failure path, not a new condition on the happy path.
+  let mounted = 0
+  let disposeTimer = null
+  plugin.apply({ effect(fn) { mounted += 1; disposeTimer = fn(); return () => {} } })
+  assert.equal(mounted, 1, 'a healthy ctx must still get the effect registration')
+  assert.equal(typeof disposeTimer, 'function', 'the effect must return a cleanup that clears the timer')
+  disposeTimer()
+  await new Promise((resolve) => setTimeout(resolve, 400))
+  assert.equal(logged().filter((l) => l.mark === 'deactivated').length, seen, 'a healthy ctx must not log a deactivation')
+  assert.deepEqual(logged().filter((l) => l.mark === 'run-start'), [], 'the mounted timer was cleared, so nothing ran')
+})
+
 // ---------------------------------------------------------------- teardown
 
 fs.rmSync(tmp, { recursive: true, force: true })

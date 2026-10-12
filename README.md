@@ -144,6 +144,37 @@ file, the log file and any `.orig` backups are the only things this plugin creat
 > runtime it does nothing at all rather than doing something wrong — the decompression call
 > fails, no rows are counted, and every file reports `below-threshold`.
 
+## Requirements / compatibility
+
+**After installing, confirm it actually works — a profile that boots is not proof.**
+A plugin can load cleanly, serve its routes and still break the host; we have seen exactly
+that. So the acceptance test is: **create a new session and send it one message**, then check
+`$DSH_HOME/logs/session-vacuum.jsonl` for a `run-start` / `run-end` pair about
+`startDelayMs` after boot. If new sessions cannot be created at all, remove the mount line
+above and restart.
+
+Developed and tested against DSH **`0.1.0-rc.7`** — a **customised** build, not a stock
+upstream release. Another version may register its services differently: this plugin uses
+`ctx.effect` (and nothing else from the host).
+
+If your build does not match, the plugin **deactivates and says so** — it does **not** stop the
+profile from booting. No timer is armed, no session log is touched, and one line lands in
+`logs/session-vacuum.jsonl`:
+
+```json
+{"mark":"deactivated","reason":"registration-failed","step":"services","error":"..."}
+```
+
+**If the profile will not start at all after installing**, remove the mounted lines from
+`<profile>/cordis.patch.yml` (or drop `"dsh-session-vacuum"` from `dsh.profile.bundles`, if
+that is how you installed it) and restart:
+
+```yaml
+- insert:
+    - id: session-vacuum
+      name: 'file:///path/to/dsh-session-vacuum/lib/index.js'
+```
+
 ## Configuration
 
 `$DSH_HOME/dsh-session-vacuum/config.json` (falling back to `~/.dsh/…`). Missing file, or a
@@ -257,7 +288,7 @@ which is more useful than anyone else's.
 The rewrite has been verified end to end offline: a synthetic log of the same shape is
 pruned, replaced, then re-read by decompressing its individual zstd frames and parsing every
 JSONL line, and the surviving rows are compared against exactly the non-fragment rows that
-went in (`test/vacuum-tests.mjs`, 18 cases).
+went in (`test/vacuum-tests.mjs`, 21 cases).
 
 ## Tests
 
@@ -268,7 +299,7 @@ npm run test:vacuum
 
 They run fully offline: no DSH, no network, no API key, and a throwaway `DSH_HOME` under
 `os.tmpdir()` — `process.env.DSH_HOME` is redirected **before** the plugin is imported, and
-every log in the suite is synthesised locally. The suite prints `18 passed, 0 failed` and
+every log in the suite is synthesised locally. The suite prints `21 passed, 0 failed` and
 exits non-zero if anything failed.
 
 | Area | Cases | Covers |
@@ -283,6 +314,7 @@ exits non-zero if anything failed.
 | real run | 3 | the log is replaced and smaller, `.orig` is byte-exact, no temp file is left, and the result re-reads frame by frame as valid JSONL with the same events in the same order |
 | bad input | 2 | a non-zstd file and a torn JSON line are reported, not rewritten |
 | discovery / startup | 2 | recursion finds only `session.jsonl.zstd`; `runVacuum` scans, honours `maxFilesPerRun`, logs each file, and leaves the files alone under `dryRun` |
+| registration | 1 | a hostile `ctx` (`effect` throwing, `effect` absent, `ctx` null) makes `apply()` return normally, log exactly one `deactivated` line per failure, arm no timer, and still mount the timer normally on a healthy `ctx` |
 
 > **For contributors:** `test()` **must** `await fn()`, in every suite. A synchronous harness
 > reports `ok` before any async assertion runs and lets the script reach the exit line first,

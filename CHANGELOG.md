@@ -7,7 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **Hardening: `apply()` can no longer take a profile down.** The `ctx.effect` registration is
+  now guarded, and a build that does not expose it gets ONE line in
+  `logs/session-vacuum.jsonl` (`mark: "deactivated"`, `reason: "registration-failed"`, the
+  failing `step`, and the error) and the plugin deactivates instead of throwing out of
+  `apply()` into the loader. Deactivating also clears the timer it had already armed, so the
+  plugin cannot log "deactivated" and then quietly scan session logs anyway. The trigger was a
+  real third-party plugin (`cancanqiqi/dsh-human-subagent`) whose `apply()` threw
+  `Cannot read properties of undefined (reading 'register')` and stopped a whole DSH profile
+  from booting. Nothing on the success path changed — `enabled: false` still returns before
+  anything else, and the config read is untouched. `README.md` / `README.zh-CN.md` now carry a
+  *Requirements / compatibility* section.
+- **A regression test for it** (`test/vacuum-tests.mjs`: "apply() returns normally when the
+  context is hostile, and records the deactivation"), covering a throwing `ctx.effect`, a
+  missing `ctx.effect` and a null `ctx`, and asserting one deactivation line per failure, no
+  timer left running, and that a healthy `ctx` still mounts the timer. Proven by hand, not just
+  by the green suite: removing the pre-check and removing the try/catch each turn the new case
+  red (`20 passed, 1 failed`) and restoring them turns it green (`21 passed, 0 failed`).
 
 ## [0.1.0] - 2026-10-11
 
