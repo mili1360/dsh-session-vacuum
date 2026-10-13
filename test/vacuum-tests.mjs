@@ -554,7 +554,266 @@ await test('runVacuum scans $DSH_HOME/sessions, honours maxFilesPerRun and logs 
   assert.equal(fs.existsSync(path.join(tmp, 'sessions', 's1', 'session.jsonl.zstd.vacuum-tmp')), false)
 })
 
+// ---------------------------------------------------------------- on-demand cleanup
+
+// One directory holding all three outcomes at once: a file that qualifies, a file DSH may
+// be writing right now, and a file under the thresholds. These three cases are exactly what
+// used to be invisible -- `run-end` said `handled: 1` and nothing else, so a user watching a
+// log with 58 files in it could not tell a working plugin from a no-op.
+const ON_DEMAND = {
+  enabled: true,
+  startDelayMs: 60000,
+  minIntervalMs: 0,
+  minChunkRows: 20,
+  minRatio: 0.2,
+  liveWindowMs: 600000,
+  maxFilesPerRun: 12,
+  dryRun: false,
+  logFile: 'logs/session-vacuum.jsonl',
+}
+const ON_DEMAND_ROOT = path.join(tmp, 'sessions')
+const onDemandConfig = path.join(tmp, 'dsh-session-vacuum', 'config.json')
+const onDemandLog = path.join(tmp, 'logs', 'session-vacuum.jsonl')
+let staleFile = ''
+let liveFile = ''
+let belowFile = ''
+let thirdFile = ''
+
+// The logs these cases scan live directly under $DSH_HOME/sessions (that is the only
+// directory the entry points look at), so the shared directory is rebuilt for each case:
+// the two cases above left their own -- much larger -- logs there.
+function buildOnDemandDir() {
+  fs.rmSync(path.join(tmp, 'sessions'), { recursive: true, force: true })
+  const rows = (opts) => buildRows(opts).rows
+  staleFile = writeLog(path.join(ON_DEMAND_ROOT, 'stale', 'session.jsonl.zstd'), rows(), Date.now() - 3600000)
+  liveFile = writeLog(path.join(ON_DEMAND_ROOT, 'live', 'session.jsonl.zstd'), rows(), Date.now() + 120000)
+  belowFile = writeLog(path.join(ON_DEMAND_ROOT, 'below', 'session.jsonl.zstd'), rows({ turns: 2, chunksPerTurn: 2 }), Date.now() - 3600000)
+  // A fourth, qualifying log that the file cap leaves untouched. It is made the largest so
+  // that which file the cap keeps is deterministic: runVacuum() handles the biggest first.
+  thirdFile = writeLog(path.join(ON_DEMAND_ROOT, 'third', 'session.jsonl.zstd'), rows({ turns: 30, chunksPerTurn: 2 }), Date.now() - 3600000)
+  return { staleFile, liveFile, belowFile, thirdFile }
+}
+function writeOnDemandConfig(extra) {
+  fs.mkdirSync(path.dirname(onDemandConfig), { recursive: true })
+  fs.writeFileSync(onDemandConfig, JSON.stringify({ ...ON_DEMAND, ...extra }))
+}
+function onDemandLogLines() {
+  return fs.readFileSync(onDemandLog, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+}
+
+await test('run-end counts every skip by reason instead of reporting only `handled`', async () => {
+  buildOnDemandDir()
+  writeOnDemandConfig({})
+  fs.rmSync(onDemandLog, { force: true })
+
+  const results = await plugin.runVacuum(undefined, { fileLimit: 12, trigger: 'tool' })
+  assert.equal(Array.isArray(results), true, 'runVacuum must hand back its per-file results')
+
+  const end = onDemandLogLines().find((l) => l.mark === 'run-end')
+  assert.ok(end !== undefined, 'a run-end line must be written')
+  assert.equal(end.scanned, 4, 'all four logs must have been looked at')
+  assert.equal(end.skippedLive, 1, 'the file written in the future must be counted live, got ' + end.skippedLive)
+  assert.equal(end.belowThreshold, 1, 'the small log must be counted below-threshold, got ' + end.belowThreshold)
+  assert.equal(end.unreadable, 0)
+  assert.equal(end.other, 0, 'nothing here fails for another reason')
+  assert.equal(end.vacuumed, 2)
+  // handled keeps the meaning it always had: the files this run actually acted on.
+  assert.equal(end.handled, 2, 'handled must stay "files this run acted on", got ' + end.handled)
+  assert.equal(end.handled, end.vacuumed + end.wouldVacuum + end.unreadable + end.other)
+
+  // The counters are the only thing that changed. The pass itself still cleaned the
+  // qualifying logs and still refused the live one.
+  assert.equal(fs.existsSync(liveFile + '.orig'), false, 'a live log may never be backed up')
+  assert.equal(fs.existsSync(belowFile + '.orig'), false, 'a below-threshold log may never be backed up')
+  assert.ok(fs.existsSync(staleFile + '.orig'), 'a cleaned log must keep its .orig')
+  assert.equal(plugin.vacuumOne(liveFile, plugin.readConfig()).status, 'skipped-live',
+    'the live log must still be live after the pass')
+})
+
+// The tool's whole point: a report a human can read, naming each file and its reason.
+await test('clean_session_logs returns a text report naming each clean and each skip reason', async () => {
+  buildOnDemandDir()
+  writeOnDemandConfig({ dryRun: false })
+  const result = await plugin.runCleanSessionLogs({ dryRun: true })
+  assert.equal(typeof result, 'string', 'the report must be plain text, not JSON')
+
+  assert.match(result, /DRY RUN/)
+  assert.match(result, /Scanned 4 session log\(s\)/, 'the report must say how many logs were scanned')
+  assert.match(result, /Would clean: 2 log\(s\)/)
+  assert.match(result, /stale[\\/]session\.jsonl\.zstd/, 'a cleaned log must be named')
+  assert.match(result, /MB -> /, 'the report must give before -> after in MB')
+  assert.match(result, /skippedLive: 1/, 'the live skip must be broken out by reason')
+  assert.match(result, /belowThreshold: 1/, 'the threshold skip must be broken out by reason')
+  assert.match(result, /live[\\/]session\.jsonl\.zstd/, 'the skipped log must be named too')
+  assert.match(result, /modified inside liveWindowMs/, 'and its reason spelled out')
+  assert.match(result, /not enough streaming fragments/, 'and so must the threshold skip')
+  assert.match(result, /fragment row\(s\) dropped/)
+  // The report must not silently be empty of detail: run-end counters are echoed for the log.
+  assert.match(result, /run-end counters .*scanned=4/)
+})
+
+await test('the tool report states that the caller session cannot be cleaned from inside DSH', async () => {
+  const result = await plugin.runCleanSessionLogs({ dryRun: true })
+  assert.match(result, /session you are running in cannot be cleaned from inside a running DSH/i)
+  assert.match(result, /corrupt/, 'the report must say why (rewriting it can corrupt it)')
+  assert.match(result, /stop DSH/i, 'and must say what to do instead')
+  assert.match(result, /清理会话日志\.cmd/, 'naming the offline script to run after stopping DSH')
+  assert.match(result, /liveWindowMs/, 'and the idle window that lets a later boot do it')
+})
+
+await test('dryRun: true through the tool writes nothing at all', async () => {
+  buildOnDemandDir()
+  writeOnDemandConfig({ dryRun: false })
+  const files = [staleFile, liveFile, belowFile, thirdFile]
+  const before = files.map((f) => fs.readFileSync(f))
+  const mtimes = files.map((f) => fs.statSync(f).mtimeMs)
+  fs.rmSync(onDemandLog, { force: true })
+
+  // dryRun comes only from the argument here: the config says dryRun: false, so a tool that
+  // ignored its argument (or fell through to the config) would really rewrite these logs.
+  const result = await plugin.runCleanSessionLogs({ dryRun: true })
+  assert.match(result, /DRY RUN/, 'the report must say this was a preview')
+  assert.match(result, /Would clean: \d+ log\(s\)/, 'a preview of a real pass must still report candidates')
+
+  for (let i = 0; i < files.length; i++) {
+    assert.deepEqual(fs.readFileSync(files[i]), before[i], 'dryRun must not change one byte of ' + files[i])
+    assert.equal(fs.statSync(files[i]).mtimeMs, mtimes[i], 'dryRun must not even touch ' + files[i])
+    assert.equal(fs.existsSync(files[i] + '.orig'), false, 'dryRun must not back anything up')
+    assert.equal(fs.existsSync(files[i] + '.vacuum-tmp'), false, 'dryRun must not leave a temp file')
+  }
+  // Nothing was replaced and nothing was backed up, so no status may claim it was.
+  const statuses = onDemandLogLines().filter((l) => l.mark === 'file').map((l) => l.status)
+  assert.equal(statuses.includes('vacuumed'), false, 'a dry run must never report vacuumed, got ' + statuses.join(','))
+  assert.equal(statuses.includes('would-vacuum'), true, 'a dry run must report would-vacuum')
+})
+
+await test('a real pass through the tool cleans what it reports it cleaned', async () => {
+  buildOnDemandDir()
+  writeOnDemandConfig({ dryRun: false })
+  const liveBefore = fs.readFileSync(liveFile)
+  const belowBefore = fs.readFileSync(belowFile)
+  const thirdBefore = fs.readFileSync(thirdFile)
+  const staleBefore = fs.readFileSync(staleFile)
+
+  const result = await plugin.runCleanSessionLogs({})
+  assert.doesNotMatch(result, /DRY RUN/, 'a real pass must not claim to be a preview')
+  assert.match(result, /Cleaned: 2 log\(s\)/)
+  assert.match(result, /stale[\\/]session\.jsonl\.zstd/)
+  assert.match(result, /third[\\/]session\.jsonl\.zstd/)
+
+  // What the report claims is what happened, file by file.
+  assert.deepEqual(fs.readFileSync(staleFile + '.orig'), staleBefore, '.orig must be the pre-vacuum bytes')
+  assert.deepEqual(fs.readFileSync(thirdFile + '.orig'), thirdBefore)
+  assert.ok(fs.statSync(staleFile).size < staleBefore.length, 'the cleaned log must have become smaller')
+  assert.ok(fs.statSync(thirdFile).size < thirdBefore.length)
+  assert.deepEqual(fs.readFileSync(liveFile), liveBefore, 'the live log must be byte-identical')
+  assert.deepEqual(fs.readFileSync(belowFile), belowBefore, 'the below-threshold log must be byte-identical')
+  assert.equal(fs.existsSync(liveFile + '.orig'), false, 'a live log must never be backed up')
+  assert.equal(fs.existsSync(belowFile + '.orig'), false, 'a below-threshold log must never be backed up')
+  for (const f of [staleFile, thirdFile]) assert.equal(fs.existsSync(f + '.vacuum-tmp'), false)
+})
+
+await test('the on-demand entry point cannot skip the live guard', async () => {
+  // The pass above wrote both cleaned logs, so their mtimes are now "now". That is the
+  // scenario the guard exists for, and it is also the shape the plugin gets wrong if an
+  // on-demand path is ever given a bigger hammer: the very next pass must refuse both.
+  writeOnDemandConfig({ dryRun: false })
+  const cfg = plugin.readConfig()
+  assert.ok(cfg.liveWindowMs > 0, 'the shipped default window must stay non-zero')
+  assert.ok(plugin.DEFAULTS.liveWindowMs > 0, 'and it must stay the default')
+
+  const before = fs.readFileSync(staleFile)
+  const results = await plugin.runVacuum(undefined, { dryRun: false, fileLimit: 12, trigger: 'tool' })
+  const forStale = results.filter((r) => r.file === staleFile)
+  assert.equal(forStale.length, 1, 'the file must appear in the results')
+  assert.equal(forStale[0].status, 'skipped-live',
+    'a log written seconds ago must be refused even when an agent asks for it by hand')
+  assert.deepEqual(fs.readFileSync(staleFile), before, 'and it must not be rewritten')
+})
+
 // ---------------------------------------------------------------- frame boundaries
+
+// ---------------------------------------------------------------- the web route
+
+// A tiny fake for the two objects the webServer hands a route handler. The route itself is
+// taken from the plugin, so this exercises the real handler rather than a copy of it.
+function fakeRequest(method, body) {
+  const handlers = {}
+  const req = {
+    method,
+    on(event, fn) {
+      handlers[event] = fn
+      return req
+    },
+  }
+  // Deliver the body on the next tick, the way a real stream does -- a handler that never
+  // listens for 'end' must not be able to pass this case.
+  setImmediate(() => {
+    if (handlers.data !== undefined && body !== undefined) handlers.data(Buffer.from(body, 'utf8'))
+    if (handlers.end !== undefined) handlers.end()
+  })
+  return req
+}
+function fakeResponse() {
+  const res = {
+    code: null,
+    headers: null,
+    body: '',
+    writeHead(code, headers) {
+      res.code = code
+      res.headers = headers
+      return res
+    },
+    end(text) {
+      res.body = text === undefined ? '' : String(text)
+    },
+  }
+  return res
+}
+
+await test('the web route is POST-only, preview-only, and reports the same pass', async () => {
+  buildOnDemandDir()
+  writeOnDemandConfig({ enabled: true, dryRun: true })
+  const route = plugin.vacuumRoute({})
+  assert.equal(route.path, plugin.ROUTE_PATH)
+  assert.equal(route.kind, 'exact')
+
+  // A GET is refused: this route always runs a scan, so it is not a safe method to guess at.
+  let res = fakeResponse()
+  await route.handler(fakeRequest('GET'), res)
+  assert.equal(res.code, 405, 'GET must be refused, got ' + res.code)
+  assert.match(res.body, /POST-only/i)
+
+  // A body that asks for a real pass is refused, whatever the config says.
+  res = fakeResponse()
+  await route.handler(fakeRequest('POST', JSON.stringify({ dryRun: false })), res)
+  assert.equal(res.code, 403, 'a non-dry request must be refused, got ' + res.code)
+  assert.match(res.body, /preview-only|refusing/i)
+
+  // And with dryRun: false in the config, the route refuses outright rather than exposing a
+  // destructive endpoint. (A real pass belongs to the tool, where an agent owns the call.)
+  writeOnDemandConfig({ enabled: true, dryRun: false })
+  res = fakeResponse()
+  await route.handler(fakeRequest('POST', '{}'), res)
+  assert.equal(res.code, 403, 'a profile with dryRun:false must not expose a writing route, got ' + res.code)
+  assert.match(res.body, /refusing to run a non-dry pass/i)
+
+  // The preview itself: an empty body is a dry run and the reply is the report.
+  writeOnDemandConfig({ enabled: true, dryRun: true })
+  res = fakeResponse()
+  await route.handler(fakeRequest('POST', ''), res)
+  assert.equal(res.code, 200, 'an empty-bodied POST must be a preview, got ' + res.code + ' ' + res.body)
+  assert.match(res.body, /DRY RUN/)
+  assert.match(res.body, /Scanned \d+ session log\(s\)/)
+  assert.match(res.body, /skippedLive: \d+/)
+
+  // A disabled plugin must not scan at all.
+  writeOnDemandConfig({ enabled: false, dryRun: true })
+  res = fakeResponse()
+  await route.handler(fakeRequest('POST', ''), res)
+  assert.equal(res.code, 403)
+  assert.match(res.body, /disabled/i)
+})
 
 // REGRESSION (2026-10-11). Frame boundaries used to be found by scanning for the four
 // magic bytes 28 b5 2f fd. Those bytes can occur INSIDE a frame's payload, and the mix-up
@@ -635,6 +894,12 @@ await test('apply() returns normally when the context is hostile, and records th
     { label: 'ctx.effect throws', step: 'ctx.effect', ctx: { effect() { throw new Error('boom-effect') } } },
     { label: 'ctx.effect absent', step: 'services', ctx: {} },
     { label: 'ctx is null', step: 'services', ctx: null },
+    // The on-demand interface added a second registration to the same funnel. A build whose
+    // tools service is missing must cost this plugin its own activation -- exactly like the
+    // cases above -- and never the host boot. (ctx.tools.register throwing is covered by the
+    // "route that fails to register" case below, because a throwing register must not be
+    // retried through the async path.)
+    { label: 'ctx.tools absent', step: 'ctx.tools', ctx: { effect: () => () => {} } },
   ]
 
   let seen = 0
@@ -659,15 +924,203 @@ await test('apply() returns normally when the context is hostile, and records th
 
   // And with ctx.effect present the very same apply() still mounts the timer and hands the
   // host a disposer: the guard is a failure path, not a new condition on the happy path.
+  // (defineTool is supplied because a healthy ctx that cannot compile the tool would -- quite
+  // correctly -- be a registration failure and deactivate, which is the case above.)
   let mounted = 0
   let disposeTimer = null
-  plugin.apply({ effect(fn) { mounted += 1; disposeTimer = fn(); return () => {} } })
+  plugin.apply({
+    effect(fn) { mounted += 1; disposeTimer = fn(); return () => {} },
+    tools: { defineTool: fakeDefineTool([]), register: () => () => {} },
+  })
   assert.equal(mounted, 1, 'a healthy ctx must still get the effect registration')
   assert.equal(typeof disposeTimer, 'function', 'the effect must return a cleanup that clears the timer')
   disposeTimer()
   await new Promise((resolve) => setTimeout(resolve, 400))
   assert.equal(logged().filter((l) => l.mark === 'deactivated').length, seen, 'a healthy ctx must not log a deactivation')
   assert.deepEqual(logged().filter((l) => l.mark === 'run-start'), [], 'the mounted timer was cleared, so nothing ran')
+})
+
+// A stand-in for the real defineTool: it records the spec it was handed and returns a
+// DISPOSER, exactly like the host's registry does. An identity function here would be a
+// trap -- the "definition" handed to register would then be the raw object, the disposer
+// collector would (correctly) drop it, and the test would look like it registered a tool
+// when nothing was registered at all. That mistake cost real debugging time; do not undo it.
+function fakeDefineTool(seen) {
+  return (def) => {
+    seen.push(def)
+    return () => {}
+  }
+}
+
+// The host injects services on demand: a service NOT named in `inject` is not reachable as a
+// plain property (reading it throws "cannot get property ... without inject"). `ctx.inject`
+// is the optional form -- it calls back only once that service exists. This helper mimics it,
+// so the route cases exercise the real shape instead of a context that could never happen.
+function ctxWithInject(services) {
+  return {
+    inject(names, fn) {
+      for (const n of names) if (!(n in services)) return
+      return fn(services)
+    },
+  }
+}
+
+await test('a route that fails to register costs the route only, not the plugin', async () => {
+  assert.equal(plugin.TOOL_NAME, 'clean_session_logs', 'the tool name a model has to pick')
+  assert.equal(plugin.ROUTE_PATH, '/api/local/session-vacuum/run')
+  assert.deepEqual(plugin.inject, ['tools'], 'the plugin must declare the service it reads')
+
+  const logFile = path.join(tmp, 'logs', 'session-vacuum.jsonl')
+  const configFile = path.join(tmp, 'dsh-session-vacuum', 'config.json')
+  fs.writeFileSync(configFile, JSON.stringify({ enabled: true, startDelayMs: 60000, dryRun: true }))
+  fs.rmSync(logFile, { force: true })
+  const logged = () => fs.readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+
+  // 1. webServer.register throws. The tool still works; the plugin must NOT deactivate.
+  const specs = []
+  let routeHandedOver = false
+  const webServer = { register: () => { routeHandedOver = true; throw new Error('boom-route') } }
+  plugin.apply(Object.assign({
+    effect: () => () => {},
+    tools: { defineTool: fakeDefineTool(specs), register: () => () => {} },
+  }, ctxWithInject({ webServer })))
+  assert.equal(specs.length, 1, 'the tool must still be handed to the registry when the route fails')
+  const spec = specs[0]
+  assert.equal(spec.name, 'clean_session_logs')
+  assert.equal(routeHandedOver, true, 'the route registration must have been attempted')
+  const routeFailed = logged().filter((l) => l.mark === 'route-failed')
+  assert.equal(routeFailed.length, 1, 'a failed route must be reported, not swallowed silently')
+  assert.equal(routeFailed[0].path, plugin.ROUTE_PATH)
+  assert.equal(logged().filter((l) => l.mark === 'deactivated').length, 0,
+    'a route failure must NOT deactivate the plugin')
+
+  // 2. webServer absent (a headless profile): no route, no complaint, same tool.
+  const more = []
+  plugin.apply({
+    effect: () => () => {},
+    tools: { defineTool: fakeDefineTool(more), register: () => () => {} },
+  })
+  assert.equal(more.length, 1, 'a build with no webServer must still get the tool')
+  assert.equal(logged().filter((l) => l.mark === 'route-failed').length, 1,
+    'no webServer means nothing was attempted, so nothing new failed')
+  assert.equal(logged().filter((l) => l.mark === 'deactivated').length, 0,
+    'a missing webServer must not deactivate the plugin')
+
+  // 3. The spec the host receives really runs the guarded pass and reports in text.
+  writeOnDemandConfig({ enabled: true, dryRun: true })
+  const value = await spec.execute({ dryRun: true })
+  assert.equal(typeof value.report, 'string', 'the tool must return its report')
+  assert.match(value.report, /DRY RUN/)
+  assert.match(value.report, /cannot be cleaned from inside a running DSH/i)
+
+  // Optional, no required arguments, and a schema the registry can compile.
+  assert.deepEqual(Object.keys(spec.parameters), ['dryRun'])
+  assert.equal(spec.parameters.dryRun.type, 'boolean')
+  assert.equal(spec.parameters.dryRun.required, undefined, 'dryRun must stay optional')
+  assert.equal(spec.output.schema.properties.report.required, true)
+
+  // 4. A tool that cannot be registered deactivates, like every other registration failure,
+  //    and apply() still must not throw.
+  let threw = null
+  try {
+    plugin.apply({
+      effect: () => () => {},
+      tools: { defineTool: fakeDefineTool([]), register() { throw new Error('boom-tools') } },
+    })
+  } catch (err) {
+    threw = err
+  }
+  assert.equal(threw, null, 'apply() must never throw out of a failed tool registration')
+  const after = logged().filter((l) => l.mark === 'deactivated')
+  assert.equal(after.length, 1)
+  assert.equal(after[0].step, 'ctx.tools')
+})
+
+await test('the tool is registered synchronously, and the bare-object form works with no defineTool', async () => {
+  const logFile = path.join(tmp, 'logs', 'session-vacuum.jsonl')
+  const configFile = path.join(tmp, 'dsh-session-vacuum', 'config.json')
+  fs.writeFileSync(configFile, JSON.stringify({ enabled: true, startDelayMs: 60000, dryRun: true }))
+  fs.rmSync(logFile, { force: true })
+  const logged = () => fs.readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+
+  // Registration must be synchronous: nothing about apply() may depend on a later tick, or a
+  // caller looking at the registry right after apply() sees a plugin that "did nothing".
+  // (This build's ctx.tools has no defineTool, so this really is the cold path.)
+  const specs = []
+  plugin.apply({
+    effect: () => () => {},
+    tools: { register: () => () => {} },
+  }, fakeDefineTool(specs))
+  assert.equal(specs.length, 1, 'the tool must reach the registry before apply() returns')
+  assert.equal(specs[0].name, 'clean_session_logs')
+  assert.equal(typeof specs[0].execute, 'function')
+  assert.equal(specs[0].parameters.dryRun.type, 'boolean')
+  assert.equal(specs[0].parameters.dryRun.required, undefined)
+  assert.equal(specs[0].output.schema.properties.report.required, true)
+
+  // With nothing to compile it at all, the bare object must still be usable.
+  for (const nothing of [null, undefined]) {
+    const bare = plugin.buildTool(nothing)
+    assert.equal(bare.name, 'clean_session_logs')
+    assert.equal(typeof bare.execute, 'function', 'the bare-object form must be executable')
+    assert.equal(bare.parameters.type, 'object')
+    assert.equal(bare.parameters.properties.dryRun.type, 'boolean')
+    assert.equal(bare.output.schema.properties.report.type, 'string')
+    const value = await bare.execute({ dryRun: true })
+    assert.equal(typeof value.report, 'string', 'and must really run the pass')
+  }
+  assert.equal(logged().filter((l) => l.mark === 'deactivated').length, 0,
+    'a missing defineTool is a fallback, not a failure')
+
+  // And if even that fails, the plugin deactivates rather than leaving a live timer behind.
+  fs.rmSync(logFile, { force: true })
+  let mounted = 0
+  let threw = null
+  try {
+    plugin.apply({
+      effect: (fn) => { mounted += 1; fn(); return () => {} },
+      tools: { register() { throw new Error('boom-tools') } },
+    })
+  } catch (err) {
+    threw = err
+  }
+  assert.equal(threw, null, 'apply() must never throw out of a failed tool registration')
+  const lines = logged().filter((l) => l.mark === 'deactivated')
+  assert.equal(mounted, 1, 'the effect must have been registered before the tool attempt')
+  assert.equal(lines.length, 1, 'the failure must land on the deactivation path')
+  assert.equal(lines[0].step, 'ctx.tools')
+  assert.match(lines[0].error, /boom-tools/)
+
+  // The module really is resolvable at load time in this build, which is what lets the tool
+  // land synchronously; the fallback resolver must agree with that.
+  const resolved = await plugin.loadToolModule()
+  assert.equal(resolved.ok, true, 'dsh-tools must resolve for the plugin dir: ' + resolved.error)
+  assert.equal(typeof resolved.defineTool, 'function')
+})
+
+await test('disposing the plugin disposes both registrations it made', async () => {
+  const configFile = path.join(tmp, 'dsh-session-vacuum', 'config.json')
+  fs.writeFileSync(configFile, JSON.stringify({ enabled: true, startDelayMs: 60000, dryRun: true }))
+  let toolRegistered = 0
+  let disposedTool = 0
+  let disposedRoute = 0
+  let fiberDisposer = null
+  plugin.apply({
+    effect: (fn) => {
+      // The host calls fn() to mount and the returned callback to unmount. Running fn()
+      // here is what makes the disposers in lib/index.js reachable at all.
+      fiberDisposer = fn()
+      return () => {}
+    },
+    tools: { defineTool: fakeDefineTool([]), register: () => { toolRegistered += 1; return () => { disposedTool++ } } },
+    ...ctxWithInject({ webServer: { register: () => () => { disposedRoute++ } } }),
+  })
+  assert.equal(toolRegistered, 1, 'a healthy ctx must get the tool')
+  assert.equal(typeof fiberDisposer, 'function', 'the effect must return a cleanup')
+  assert.equal(disposedTool, 0, 'nothing may be disposed before the fiber ends')
+  fiberDisposer()
+  assert.equal(disposedTool, 1, 'the tool registration must be removed on dispose')
+  assert.equal(disposedRoute, 1, 'the route registration must be removed on dispose')
 })
 
 // ---------------------------------------------------------------- teardown

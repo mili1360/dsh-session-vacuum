@@ -7,8 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`clean_session_logs`: run a pass on demand.** A Host tool, registered with
+  `ctx.tools.register` exactly the way this codebase does it, so an agent no longer has to
+  wait for the boot-time run — which skips everything written inside `liveWindowMs`, i.e.
+  usually the session a user actually cares about. It takes no required arguments and one
+  optional `dryRun` boolean, and it returns a **plain-text report**: logs scanned, logs
+  cleaned (before → after MB per file, capped at a few lines), total saved, and how many logs
+  were skipped **broken down by reason** — plus each skipped file's own reason. It runs the
+  **same** guarded pass as the boot timer: same `runVacuum()`, same `vacuumOne()`, same
+  `liveWindowMs`, same thresholds. It is not a bigger hammer and it cannot clean the caller's
+  own session; the report says so, and says what to do instead (stop DSH and run
+  `E:\Dsh百宝箱\清理会话日志.cmd`, or let a later boot clean it once it has been idle for
+  `liveWindowMs`). `defineTool` is resolved from `@deepseek-ai/dsh-tools` at plugin load, so
+  the tool registers **synchronously**; if that package cannot be resolved the tool is still
+  registered in the bare-object form rather than disappearing.
+- **A preview-only web route**, `POST /api/local/session-vacuum/run`, registered with
+  `ctx.webServer.register({ kind, path, handler })`. POST-only (405 otherwise) and
+  preview-only: a body asking for a real pass gets 403, and a profile configured with
+  `dryRun: false` refuses outright rather than exposing a destructive endpoint. A real pass
+  belongs to the tool, where an agent owns the call. Route registration failure is logged as
+  `mark: "route-failed"` and is not fatal — the tool is the part that matters.
+- **Skip-reason counts in `run-end`**: `scanned`, `vacuumed`, `wouldVacuum`, `skippedLive`,
+  `belowThreshold`, `unreadable`, `other`, alongside the `handled` that was always there
+  (unchanged in meaning: the files the run acted on). Previously the only thing a run reported
+  was how many files it handled, so 56 skipped files and their reasons were invisible and a
+  working plugin looked like a no-op. `run-start` also carries `trigger` (`boot` / `tool` /
+  `route`) so the log says which entry point asked. **What gets cleaned did not change** —
+  this is observability only.
+- **16 new tests** (31 total): the skip-reason counters over a directory holding a qualifying,
+  a live, a below-threshold and a cap-excluded log; the tool report naming each clean and each
+  skip with its reason *and* carrying the caller-session caveat; `dryRun: true` changing no
+  byte and no mtime; a real pass cleaning exactly what it reported; the live guard still
+  refusing a just-written log through the tool path; the route's 405/403/preview/disabled
+  behaviour; synchronous tool registration; a route failure costing only the route; and
+  disposal removing both registrations. Three of them were proven non-vacuous by mutation:
+  hard-coding the skip counters to 0, removing the caveat lines, and dropping the tool's
+  `dryRun` argument each turned the suite red and restoring each turned it green.
+
 ### Changed
 
+- **`apply()` registers `ctx.effect` before the other registrations.** The effect callback is
+  the host's only handle for undoing them; if `apply()` failed later while the effect had not
+  been handed over yet, the boot timer it had already armed could not be cleared — a plugin
+  that says "deactivated" and keeps scanning. It is now registered first, and every later
+  failure goes through the same deactivation path.
+- **Two bugs found while building this, both silent.** (1) The tool's `output.schema` used a
+  root `required` array; DSH's value-schema DSL wants `required: true` on the property and
+  rejects the array with `UNSUPPORTED_SCHEMA`, so the tool could never have registered — the
+  fix follows `dsh-tool-fs` / `dsh-tool-todo`. (2) The registrar passed to `registerTool` was
+  the disposer collector, not a function that calls `ctx.tools.register`; the collector saw a
+  non-function, dropped it, and the plugin reported success while the tool never entered the
+  registry. Both are now pinned by tests that assert on what the registry actually receives.
+
+### Fixed
+
+- **The plugin was deactivated on a real boot by its own tool registration.** Cordis injects
+  services on demand, so a service not declared in `inject` is not a property on `ctx` at all:
+  `ctx.tools` threw `cannot get property "tools" without inject` and the plugin stood down —
+  correctly and visibly, thanks to the existing hardening, but the interface was unusable. The
+  offline suite could not have caught this; the sandbox boot did, which is why the boot is part
+  of the acceptance test. `inject` is now `['tools']`, and the route uses the optional
+  `ctx.inject(['webServer'], ...)` form instead of being declared, so a headless profile still
+  gets the tool.
 - **Hardening: `apply()` can no longer take a profile down.** The `ctx.effect` registration is
   now guarded, and a build that does not expose it gets ONE line in
   `logs/session-vacuum.jsonl` (`mark: "deactivated"`, `reason: "registration-failed"`, the

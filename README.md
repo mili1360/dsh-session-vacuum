@@ -74,6 +74,86 @@ The plugin cannot shrink an already-loaded session — it does not need to. Prun
 means every *future* load is small, which is where the memory, the stutter and the OOM came
 from.
 
+## Running it on demand
+
+The boot run has one practical flaw: it skips anything written inside `liveWindowMs`
+(10 minutes by default), which is usually *the session you actually care about*. And until
+this interface existed, the run reported only how many files it handled, so a scan that
+skipped 56 of 58 logs looked identical to a plugin that does nothing.
+
+Two things follow from that, and both are now in place.
+
+### The log says why every file was skipped
+
+`run-end` carries a count per reason, next to the `handled` it always had:
+
+```json
+{"mark":"run-end","scanned":58,"handled":2,"vacuumed":2,"wouldVacuum":0,
+ "skippedLive":56,"belowThreshold":0,"unreadable":0,"other":0}
+```
+
+`handled` keeps exactly the meaning it always had — the files this run actually acted on.
+The rest are the ones it did **not** act on, broken down by the same `status` strings the
+`file` lines use. **Nothing about what gets cleaned changed**; this is observability only.
+
+### `clean_session_logs` — ask for a pass now
+
+An agent can call the Host tool **`clean_session_logs`**. It takes no required arguments and
+one optional one:
+
+| argument | default | meaning |
+|---|---|---|
+| `dryRun` | `false` | `true` ⇒ preview only: decode, prune and verify every candidate, report what a real pass would save, and write nothing. |
+
+It runs the **same** guarded pass as the boot timer — the same `liveWindowMs` window, the same
+two thresholds, the same `vacuumOne()` that backs up to `.orig`, verifies, and replaces
+atomically. The on-demand entry point is not a bigger hammer; it just does not have to wait
+for the next boot.
+
+It returns **plain text**, not JSON, so what you see in the transcript is what happened:
+
+```
+session-vacuum: DRY RUN - nothing was written.
+Scanned 4 session log(s) under /home/you/.dsh/sessions.
+Would clean: 2 log(s).
+  - /home/you/.dsh/sessions/third/session.jsonl.zstd: 0.01 MB -> 0 MB (saves 0.01 MB), 120 fragment row(s) dropped, 92 event(s) kept
+  - /home/you/.dsh/sessions/stale/session.jsonl.zstd: 0.01 MB -> 0 MB (saves 0.01 MB), 120 fragment row(s) dropped, 38 event(s) kept
+Total that a real pass would save: 0.02 MB.
+Skipped: 2 log(s), by reason:
+  - skippedLive: 1 - modified within the last 10 minute(s), so DSH may still be writing it.
+  - belowThreshold: 1 - under minChunkRows (20) or minRatio (0.2).
+  - /home/you/.dsh/sessions/live/session.jsonl.zstd: SKIPPED - modified inside liveWindowMs, so DSH may be writing it right now
+  - /home/you/.dsh/sessions/below/session.jsonl.zstd: SKIPPED - not enough streaming fragments to be worth a rewrite (8 fragment row(s), ratio 0.571)
+run-end counters (logs/session-vacuum.jsonl): scanned=4, handled=2, vacuumed=0, wouldVacuum=2, skippedLive=1, belowThreshold=1, unreadable=0, other=0
+NOTE: the session you are running in cannot be cleaned from inside a running DSH.
+  DSH holds that session in memory, and rewriting its log underneath it can corrupt it.
+  The liveWindowMs guard (10 min) already refuses it, so this pass cannot touch it - that is the only protection, and it was not weakened.
+  What to do instead: stop DSH and run E:\Dsh百宝箱\清理会话日志.cmd,
+  or leave it idle for at least liveWindowMs (10 min) and let a later boot clean it.
+```
+
+**The session you are running in cannot be cleaned from inside a running DSH**, and the report
+says so. DSH holds an active session in memory and keeps appending to its log; rewriting that
+file underneath it can corrupt it. The `liveWindowMs` guard already refuses it, and it was not
+weakened for this interface. To clean that particular session: **stop DSH** and run
+`E:\Dsh百宝箱\清理会话日志.cmd`, or leave it idle for at least `liveWindowMs` and let a later
+boot do it.
+
+### The web route (preview only)
+
+A script can also ask, over HTTP:
+
+```
+POST /api/local/session-vacuum/run
+```
+
+It is **POST-only** and **preview-only**: any body that asks for a real pass is refused with
+403, and a profile with `dryRun: false` refuses outright rather than exposing a destructive
+endpoint. A real pass belongs to the tool, where an agent owns the call. An empty body (or
+`{}` / `{"dryRun":true}`) is a dry run and the response body is the same text report.
+
+Both entry points are inert while `enabled` is `false`, and neither one can bypass the guard.
+
 ## How this differs from the runtime approaches
 
 The same dead weight has a second, complementary fix: trim it at **read time** instead of at
@@ -154,8 +234,17 @@ that. So the acceptance test is: **create a new session and send it one message*
 above and restart.
 
 Developed and tested against DSH **`0.1.0-rc.7`** — a **customised** build, not a stock
-upstream release. Another version may register its services differently: this plugin uses
-`ctx.effect` (and nothing else from the host).
+upstream release. Another version may register its services differently. This plugin declares
+`inject: ['tools']` and uses `ctx.effect`, `ctx.tools.register` (the on-demand tool), and
+optionally `ctx.webServer.register` (the preview route).
+
+> **Why `inject` is not optional.** Cordis injects services on demand: a service that is not
+> declared in `inject` does not exist as a property on `ctx`, and reading it throws
+> `cannot get property "tools" without inject`. That is not theory — the first build of this
+> interface was deactivated by exactly that line on a real boot. `webServer` is deliberately
+> **not** declared, because a headless profile has no web server: the route uses the optional
+> `ctx.inject(['webServer'], ...)` form instead, so a profile without one still gets the tool.
+> If `ctx.inject` is unavailable too, the plugin logs `mark: "route-failed"` and carries on.
 
 If your build does not match, the plugin **deactivates and says so** — it does **not** stop the
 profile from booting. No timer is armed, no session log is touched, and one line lands in
@@ -164,6 +253,13 @@ profile from booting. No timer is armed, no session log is touched, and one line
 ```json
 {"mark":"deactivated","reason":"registration-failed","step":"services","error":"..."}
 ```
+
+`step` names what failed: `services` (`ctx.effect` missing), `ctx.effect` (it threw), or
+`ctx.tools` (no usable tools registry). A failing **route** is not in that list: it is logged
+as `mark: "route-failed"` and the plugin stays active with its tool, because the route is a
+convenience and the tool is the point. `@deepseek-ai/dsh-tools` is resolved at plugin load to
+get `defineTool`; if it cannot be resolved the tool is still registered in the bare-object form
+(`ctx.tools.register({...})`) rather than disappearing.
 
 **If the profile will not start at all after installing**, remove the mounted lines from
 `<profile>/cordis.patch.yml` (or drop `"dsh-session-vacuum"` from `dsh.profile.bundles`, if
@@ -204,10 +300,12 @@ timestamp and a `mark`:
 
 | `mark` | Meaning |
 |---|---|
-| `run-start` | A scan began. Carries `files` (how many logs were found) and `dryRun`. |
+| `run-start` | A scan began. Carries `files` (how many logs were found), `dryRun`, and `trigger` (`boot`, `tool` or `route` — which entry point asked). |
 | `file` | One file was handled, with its `status`. |
-| `run-end` | The scan finished. Carries `handled` — how many files the run acted on. |
+| `run-end` | The scan finished. Carries `handled` — how many files the run acted on — plus `scanned` and a count per skip reason: `vacuumed`, `wouldVacuum`, `skippedLive`, `belowThreshold`, `unreadable`, `other`. |
 | `run-error` | The scan itself failed (the per-file errors are reported as `file` lines). |
+| `route-failed` | The web route could not be registered. Reported, not fatal: the tool still works. |
+| `deactivated` | A registration failed and the plugin stood down (see [Requirements / compatibility](#requirements--compatibility)). |
 
 `status` on a `file` line is one of:
 
@@ -219,17 +317,25 @@ timestamp and a `mark`:
 | `skipped-live` | Modified inside `liveWindowMs` — possibly being written right now. |
 | `verify-failed` | The pruned log failed the loader contract. `problems` lists the first five. Nothing was written. |
 | `unreadable` | Not a zstd frame stream. |
+| `unreadable-tail` | The frame walk could not account for the tail. Nothing was written. |
 | `unparsable` | A line in the decoded text is not JSON. Nothing was written. |
 | `prune-failed` | The `session` header row is missing. |
 | `error` | Anything else about this file. |
 
 A run is a diagnostic pass first: `dryRun: true` for long enough to see `would-vacuum` lines
-with plausible `beforeMB` / `afterMB` is the intended way to decide.
+with plausible `beforeMB` / `afterMB` is the intended way to decide. `clean_session_logs`
+with `dryRun: true` gives you the same picture for one session, on demand.
 
 ## Safety model
 
-- **Inert by default.** No config file ⇒ `enabled: false` ⇒ `apply()` returns before creating
-  a timer. Nothing is read, written or logged.
+- **Inert by default.** No config file ⇒ `enabled: false` ⇒ `apply()` returns before creating a
+  timer. Nothing is read, written or logged. The on-demand tool and the web route are inert
+  too: `clean_session_logs` reports that the plugin is disabled instead of scanning, and the
+  route answers 403.
+- **The on-demand interface is not a bigger hammer.** It calls the same `runVacuum()` and the
+  same `vacuumOne()`, with the same `liveWindowMs` guard and the same thresholds. It cannot
+  clean the caller's own session, cannot exceed `maxFilesPerRun`, and the HTTP route cannot
+  write at all.
 - **Dry by default.** `dryRun: true` decodes, prunes and verifies the whole log and then
   throws the result away.
 - **Never a live file.** Anything touched inside `liveWindowMs` is skipped. The point of the
@@ -288,7 +394,7 @@ which is more useful than anyone else's.
 The rewrite has been verified end to end offline: a synthetic log of the same shape is
 pruned, replaced, then re-read by decompressing its individual zstd frames and parsing every
 JSONL line, and the surviving rows are compared against exactly the non-fragment rows that
-went in (`test/vacuum-tests.mjs`, 21 cases).
+went in (`test/vacuum-tests.mjs`).
 
 ## Tests
 
@@ -299,7 +405,7 @@ npm run test:vacuum
 
 They run fully offline: no DSH, no network, no API key, and a throwaway `DSH_HOME` under
 `os.tmpdir()` — `process.env.DSH_HOME` is redirected **before** the plugin is imported, and
-every log in the suite is synthesised locally. The suite prints `21 passed, 0 failed` and
+every log in the suite is synthesised locally. The suite prints `31 passed, 0 failed` and
 exits non-zero if anything failed.
 
 | Area | Cases | Covers |
@@ -314,7 +420,10 @@ exits non-zero if anything failed.
 | real run | 3 | the log is replaced and smaller, `.orig` is byte-exact, no temp file is left, and the result re-reads frame by frame as valid JSONL with the same events in the same order |
 | bad input | 2 | a non-zstd file and a torn JSON line are reported, not rewritten |
 | discovery / startup | 2 | recursion finds only `session.jsonl.zstd`; `runVacuum` scans, honours `maxFilesPerRun`, logs each file, and leaves the files alone under `dryRun` |
-| registration | 1 | a hostile `ctx` (`effect` throwing, `effect` absent, `ctx` null) makes `apply()` return normally, log exactly one `deactivated` line per failure, arm no timer, and still mount the timer normally on a healthy `ctx` |
+| skip-reason counts | 1 | one directory holding a qualifying log, a live log, a below-threshold log and one the cap leaves alone ⇒ `run-end` reports `scanned: 4`, `skippedLive: 1`, `belowThreshold: 1`, `unreadable: 0`, `other: 0`, and `handled` still means "acted on" |
+| on-demand tool | 5 | the text report names each clean and each skip **with its reason** and the before→after MB; the caller-session caveat is stated with what to do instead; `dryRun: true` changes no byte and no mtime and backs nothing up; a real pass cleans exactly what it reported cleaning; the live guard still refuses a just-written log |
+| web route | 1 | GET is refused with 405; a body asking for a real pass is refused with 403; a profile with `dryRun: false` refuses outright; an empty POST is a preview; a disabled plugin scans nothing |
+| registration | 4 | a hostile `ctx` (`effect` throwing, `effect` absent, `ctx` null, `tools` absent) makes `apply()` return normally, log exactly one `deactivated` line per failure, and arm no timer; the tool is registered **synchronously**; a route failure costs the route only; disposal removes both registrations |
 
 > **For contributors:** `test()` **must** `await fn()`, in every suite. A synchronous harness
 > reports `ok` before any async assertion runs and lets the script reach the exit line first,
@@ -323,6 +432,12 @@ exits non-zero if anything failed.
 > [dsh-history-fold](https://github.com/mili1360/dsh-history-fold). The harness here was
 > checked the same way: two deliberately failing async cases were added, both were reported
 > `FAIL` and the run exited `1`, and the cases were then removed.
+>
+> **And a mock registry must be able to fail.** `defineTool` is the injected seam; a stand-in
+> that just returns its argument makes `buildTool()` hand the raw definition to the disposer
+> collector, which (correctly) drops it — the test then looks like it registered a tool while
+> nothing was registered at all. `fakeDefineTool()` in the suite returns a disposer, like the
+> host does. That mistake produced a green suite over a tool that could never have worked.
 
 ## Known limitations
 
@@ -340,6 +455,12 @@ exits non-zero if anything failed.
   removed. Every run re-evaluates the thresholds instead. The guarantee that does exist:
   the first backup is never overwritten.
 - **`minIntervalMs` does nothing.** Maintenance runs once per boot; there is no second run.
+- **A pass is capped at `maxFilesPerRun` files, whichever entry point asks.** The tool does not
+  get to ignore the cap, so asking it twice in a row is a way to work through a directory
+  larger than one pass. The report says how many logs were left by the cap (`not scanned`) so
+  that count is never silently missing.
+- **One pass at a time.** If a scan is already running, `clean_session_logs` does not queue a
+  second one — it says so and does nothing. The log is the record of the pass that is running.
 - **Only one file at a time, and at most `maxFilesPerRun` per boot.** A directory with many
   oversized logs is cleaned up over several restarts.
 - **The size fields are rounded to two decimals**, so `beforeMB` and `afterMB` are useless for

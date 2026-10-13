@@ -67,6 +67,81 @@ DSH 插件：开机后扫一遍会话日志，把**已经没人读的流式碎�
 它**不会**让一个已经加载进内存的会话变小 ✓ 也不需要：
 把文件修小之后，**以后每一次加载都是小的** ✓ 内存、卡顿、OOM 都是从这里来的 ✓
 
+## 按需清理
+
+开机那一轮维护有个很实际的毛病：它跳过 `liveWindowMs`（默认 10 分钟）以内写过的文件 ✗
+而那恰恰是你真正在意的那个会话 ✓
+而且在这个接口出现之前，那一轮只报「处理了几个文件」✗
+于是「扫了 58 个、跳过 56 个」和「这插件根本没用」在日志上长得一模一样 ✗
+
+### 日志会说清每个文件为什么被跳过
+
+`run-end` 现在在原来的 `handled` 旁边，按原因各记一个计数 ✓
+
+```json
+{"mark":"run-end","scanned":58,"handled":2,"vacuumed":2,"wouldVacuum":0,
+ "skippedLive":56,"belowThreshold":0,"unreadable":0,"other":0}
+```
+
+`handled` 的含义**一个字都没改** —— 仍然是「这一轮真的动了几个文件」✓
+其余的就是**没动**的那些，按 `file` 行用的**同一批** `status` 字符串分桶 ✓
+**清理行为没有任何变化**，改的只是可观测性 ✓
+
+### `clean_session_logs` —— 让 agent 当场问一次
+
+Host 工具 **`clean_session_logs`**：没有必填参数，只有一个可选参数 ✓
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `dryRun` | `false` | `true` = 只预览：解压、剪、自校验全做一遍，报告本来能省多少，**一个字节都不写** ✓ |
+
+它走的是**和开机定时器完全相同**的那条受保护通道 ——
+同一个 `liveWindowMs`、同一对阈值、同一个 `vacuumOne()`（建 `.orig`、自校验、原子替换）✓
+按需接口**不是更大的锤子**，它只是不必等到下次开机 ✓
+
+它返回**纯文本**，不是 JSON —— 你在会话里看到什么，就是它干了什么 ✓
+
+```
+session-vacuum: DRY RUN - nothing was written.
+Scanned 4 session log(s) under /home/you/.dsh/sessions.
+Would clean: 2 log(s).
+  - /home/you/.dsh/sessions/third/session.jsonl.zstd: 0.01 MB -> 0 MB (saves 0.01 MB), 120 fragment row(s) dropped, 92 event(s) kept
+  - /home/you/.dsh/sessions/stale/session.jsonl.zstd: 0.01 MB -> 0 MB (saves 0.01 MB), 120 fragment row(s) dropped, 38 event(s) kept
+Total that a real pass would save: 0.02 MB.
+Skipped: 2 log(s), by reason:
+  - skippedLive: 1 - modified within the last 10 minute(s), so DSH may still be writing it.
+  - belowThreshold: 1 - under minChunkRows (20) or minRatio (0.2).
+  - /home/you/.dsh/sessions/live/session.jsonl.zstd: SKIPPED - modified inside liveWindowMs, so DSH may be writing it right now
+  - /home/you/.dsh/sessions/below/session.jsonl.zstd: SKIPPED - not enough streaming fragments to be worth a rewrite (8 fragment row(s), ratio 0.571)
+run-end counters (logs/session-vacuum.jsonl): scanned=4, handled=2, vacuumed=0, wouldVacuum=2, skippedLive=1, belowThreshold=1, unreadable=0, other=0
+NOTE: the session you are running in cannot be cleaned from inside a running DSH.
+  DSH holds that session in memory, and rewriting its log underneath it can corrupt it.
+  The liveWindowMs guard (10 min) already refuses it, so this pass cannot touch it - that is the only protection, and it was not weakened.
+  What to do instead: stop DSH and run E:\Dsh百宝箱\清理会话日志.cmd,
+  or leave it idle for at least liveWindowMs (10 min) and let a later boot clean it.
+```
+
+**你正在用的那个会话，没法从运行中的 DSH 内部清理** ✓ 报告里会明说这一点 ✓
+DSH 把活动会话握在内存里、还在往里追加 ✗ 从底下换掉那个文件可能把它写坏 ✓
+`liveWindowMs` 本来就拦得住它，**这个接口没有把这道防线放松一丝** ✓
+真要清那一个：**先停掉 DSH**，跑 `E:\Dsh百宝箱\清理会话日志.cmd` ✓
+或者让它闲置满 `liveWindowMs`，等下次开机的那一轮顺手清掉 ✓
+
+### web 路由（只读预览）
+
+脚本还可以走 HTTP 问：
+
+```
+POST /api/local/session-vacuum/run
+```
+
+**只认 POST**，而且**只做预览**：body 里要求真跑的，一律 403 ✗
+`dryRun: false` 的 profile 更是直接拒绝 —— 不对外暴露任何破坏性入口 ✓
+真跑留给工具，那边有 agent 看着这次调用 ✓
+空 body（或 `{}` / `{"dryRun":true}`）= dry run，响应体就是上面那份文本报告 ✓
+
+两个入口在 `enabled: false` 时都是空转的，而且都绕不过那道防线 ✓
+
 ## 和"运行时裁剪"那一路的区别
 
 同一堆死重有第二种互补的解法：不在**静止时**处理，而在**读取时**处理。
@@ -144,7 +219,17 @@ DSH 插件：开机后扫一遍会话日志，把**已经没人读的流式碎�
 如果连新会话都建不出来 ⇒ 把上面那行挂载删掉、重启 ✓
 
 针对 **DSH `0.1.0-rc.7`** 开发并测试 —— 这是一个**魔改版**，不是官方原版。别的版本可能把服务
-名改掉：本插件只用到 `ctx.effect` 这一项宿主服务。
+名改掉：本插件声明 `inject: ['tools']`，用到 `ctx.effect`、`ctx.tools.register`（按需工具），
+以及可选的 `ctx.webServer.register`（预览路由）。
+
+> **`inject` 不是可选项** ✗ Cordis 的服务是**按需注入**的：没有声明在 `inject` 里的服务，
+> 在 `ctx` 上**根本不存在这个属性**，读一下就会抛
+> `cannot get property "tools" without inject` ✗
+> 这不是理论 —— 这个接口的第一版**就是被这一行在真机启动时直接停用的** ✓
+> `webServer` **故意不声明**：headless profile 里没有它 ✓
+> 路由改用可选的 `ctx.inject(['webServer'], ...)` 形式，
+> 所以没有 web 服务的 profile 照样拿得到工具 ✓
+> 连 `ctx.inject` 都没有时，记一行 `mark: "route-failed"` 然后继续 ✓
 
 版本对不上时，插件**不会**让 profile 起不来 ✓ 它会直接**停用**：不定时器、不碰任何会话日志，
 只在 `logs/session-vacuum.jsonl` 里留一行：
@@ -152,6 +237,13 @@ DSH 插件：开机后扫一遍会话日志，把**已经没人读的流式碎�
 ```json
 {"mark":"deactivated","reason":"registration-failed","step":"services","error":"..."}
 ```
+
+`step` 会指出是哪一步失败：`services`（没有 `ctx.effect`）、`ctx.effect`（它抛异常）、
+或 `ctx.tools`（没有可用的工具注册表）✓
+**路由失败不在这个表里**：它记成 `mark: "route-failed"`，
+插件带着工具继续活着 —— 因为路由只是方便，工具才是重点 ✓
+`@deepseek-ai/dsh-tools` 在插件加载时解析一次用来取 `defineTool`；
+解析不到的话，工具会退回**裸对象形态**（`ctx.tools.register({...})`）注册，而不是消失 ✓
 
 **万一装上之后 profile 根本起不来**：把 `<profile>/cordis.patch.yml` 里挂载它的那几行删掉
 （若你是用 `dsh.profile.bundles` 装的，就把数组里的 `"dsh-session-vacuum"` 去掉），然后重启：
@@ -188,10 +280,12 @@ DSH 插件：开机后扫一遍会话日志，把**已经没人读的流式碎�
 
 | `mark` | 说明 |
 |---|---|
-| `run-start` | 一次扫描开始 ✓ 带 `files`（找到几个日志）和 `dryRun` |
+| `run-start` | 一次扫描开始 ✓ 带 `files`（找到几个日志）、`dryRun`，以及 `trigger`（谁让它跑的：`boot` / `tool` / `route`） |
 | `file` | 处理了一个文件 ✓ 带 `status` |
-| `run-end` | 扫描结束 ✓ 带 `handled`（这次真的动了几个文件） |
+| `run-end` | 扫描结束 ✓ 带 `handled`（这次真的动了几个文件）、`scanned`，以及**按原因分桶的计数**：`vacuumed` / `wouldVacuum` / `skippedLive` / `belowThreshold` / `unreadable` / `other` |
 | `run-error` | 扫描本身出错（单个文件的错误记成 `file` 行） |
+| `route-failed` | web 路由没注册上 ✓ 记一行但不致命：工具照常可用 |
+| `deactivated` | 注册失败、插件已停用（见「要求 / 兼容性」） |
 
 `file` 行的 `status`：
 
@@ -203,18 +297,21 @@ DSH 插件：开机后扫一遍会话日志，把**已经没人读的流式碎�
 | `skipped-live` | `liveWindowMs` 内被动过 ⇒ 可能正在写 |
 | `verify-failed` | 剪完的结果没过加载契约 ✓ `problems` 列前五条 ✓ **什么都没写** |
 | `unreadable` | 不是 zstd 帧流 |
+| `unreadable-tail` | 帧走查没能对上尾部 ⇒ 读残了 ✓ **什么都没写** |
 | `unparsable` | 解出来的一行不是 JSON ✓ **什么都没写** |
 | `prune-failed` | 缺 `session` 头行 |
 | `error` | 这个文件的其他异常 |
 
 **推荐用法是先把它当诊断工具** ✓ 挂上之后 `dryRun: true` 跑一阵，
 看到 `would-vacuum` 行里的 `beforeMB` / `afterMB` 数字合理，再决定要不要开真跑 ✓
+`clean_session_logs` 带 `dryRun: true` 可以**随时**给你同一份画面，不用等下次开机 ✓
 
 ## 安全设计
 
 | 机制 | 作用 |
 |---|---|
-| **默认 inert** | 没有 `config.json` ⇒ `enabled:false` ⇒ `apply()` 在起定时器之前就返回 ✓ 不读不写不记 |
+| **默认 inert** | 没有 `config.json` ⇒ `enabled:false` ⇒ `apply()` 在起定时器之前就返回 ✓ 不读不写不记 ✓ 按需工具和 web 路由同样空转：`clean_session_logs` 只报告「插件是关的」，路由回 403 |
+| **按需接口不是更大的锤子** | 它调的是同一个 `runVacuum()` / 同一个 `vacuumOne()`，同一道 `liveWindowMs`、同一对阈值 ✓ 它清不了调用方自己那个会话，不能超 `maxFilesPerRun`，HTTP 路由**根本不能写** ✓ |
 | **默认 dry-run** | 整个日志解压、剪、自校验都真做一遍，然后**把结果扔掉** ✓ |
 | **绝不动活文件** | `liveWindowMs` 以内被动过的直接跳过 ✓ 整个设计的前提就是「只对 DSH 没在写的日志动手」✓ |
 | **绝不动小文件** | 两道下限都过了才允许重写一个字节 ✓ |
@@ -262,7 +359,7 @@ DSH 插件：开机后扫一遍会话日志，把**已经没人读的流式碎�
 
 重写的正确性已经离线端到端验过：一份同形状的合成日志被剪、被替换，
 然后**逐帧解压**重读、逐行 `JSON.parse`，并把存活的行走一遍比对
-（`test/vacuum-tests.mjs`，18 项）✓
+（`test/vacuum-tests.mjs`）✓
 
 ## 测试
 
@@ -274,7 +371,7 @@ npm run test:vacuum
 全离线 ✓ 不碰 DSH ✓ 不联网 ✓ 不需要 API key ✓
 `process.env.DSH_HOME` 在**导入插件之前**就被指到 `os.tmpdir()` 下的临时目录 ✓
 测试里的每一份日志都是本地合成的 ✓
-跑完打印 `21 passed, 0 failed`，有任何失败**退出码非零** ✓
+跑完打印 `31 passed, 0 failed`，有任何失败**退出码非零** ✓
 
 | 范围 | 项数 | 覆盖 |
 |---|---|---|
@@ -288,7 +385,10 @@ npm run test:vacuum
 | 真跑 | 3 | 日志被替换且更小、`.orig` 逐字节一致、不留临时文件；结果**逐帧重读**并逐行解析，事件数量与顺序都与原样一致 ✓ |
 | 坏输入 | 2 | 不是 zstd 的文件、以及 JSON 撕裂的日志：只报告，绝不重写 ✓ |
 | 发现与启动 | 2 | 递归只找 `session.jsonl.zstd`；`runVacuum` 会扫、会遵守 `maxFilesPerRun`、会逐文件记日志，而且 dry-run 下不动文件 ✓ |
-| 注册 | 1 | 上下文不兼容时（`effect` 抛异常 / 没有 `effect` / `ctx` 是 `null`）：`apply()` 正常返回、每次失败正好记一行 `deactivated`、不定任何定时器；而正常 `ctx` 下照旧挂上定时器 ✓ |
+| 跳过原因计数 | 1 | 一个目录里同时放：一个够格的、一个活着的、一个不过阈值的、一个被上限剩下的 ⇒ `run-end` 报 `scanned: 4`、`skippedLive: 1`、`belowThreshold: 1`、`unreadable: 0`、`other: 0`，而 `handled` 仍然是「真的动了几个」✓ |
+| 按需工具 | 5 | 文本报告逐个点名**清了的**和**跳过的**，并给出**原因**与 before→after MB；「调用方自己的会话清不了」那条注意事项 + 该怎么办都在报告里；`dryRun: true` 一个字节、一个 mtime 都不改，也不备份；真跑清掉的正好是它报告里说清掉的那些；刚写过的日志照样被活文件保护拦住 ✓ |
+| web 路由 | 1 | GET ⇒ 405；body 要求真跑 ⇒ 403；`dryRun: false` 的 profile 直接拒绝；空 body 的 POST 是预览；停用的插件什么都不扫 ✓ |
+| 注册 | 4 | 上下文不兼容时（`effect` 抛异常 / 没有 `effect` / `ctx` 是 `null` / 没有 `tools`）：`apply()` 正常返回、每次失败正好记一行 `deactivated`、不定任何定时器；工具是**同步**注册的；路由注册失败只损失路由本身；撤销时两个注册点都被撤掉 ✓ |
 
 > **给贡献者**：`test()` **必须 `await fn()`** ✗
 > 同步的框架会在任何 async 断言执行之前就打 `ok`，并且让脚本先走到退出那一行
@@ -296,6 +396,12 @@ npm run test:vacuum
 > 见 [dsh-history-fold](https://github.com/mili1360/dsh-history-fold) 的 `CHANGELOG.md` ✓
 > 本项目的框架用同样的方法验过：临时加两个**必失败**的 async 用例
 > ⇒ 两个都报 `FAIL`、退出码 `1` ⇒ 随后删掉 ✓
+>
+> **另外：假注册表必须有能力失败** ✗ `defineTool` 是那个可注入的接缝 ✓
+> 如果替身只会把自己的参数原样返回，`buildTool()` 就会把**原始定义**交给收撤销函数的那个
+> 收集器，而它（判断正确）会把它丢掉 ⇒ 测试**看起来注册成功了，其实什么都没注册** ✗
+> 测试里的 `fakeDefineTool()` 返回的是撤销函数，和宿主的注册表一样 ✓
+> 这个错曾经让一整套绿色的测试盖在一个**根本不可能工作**的工具上 ✓
 
 ## 已知边界
 
@@ -314,6 +420,11 @@ npm run test:vacuum
 - **`minIntervalMs` 没有任何作用** ✗ 维护是每次开机跑一次，不存在第二次运行 ✓
 - **一次只处理一个文件、每次开机最多 `maxFilesPerRun` 个** ✓
   一堆超大日志要清，得分几次重启才能清完 ✓
+  **按需接口同样受这个上限约束**（它不给自己开后门）✓
+  所以连着问两次，就是清超过一轮容量的目录的办法 ✓
+  报告里会写明这一轮被上限剩下了几个（`not scanned`），不让那个数字凭空消失 ✓
+- **同一时刻只跑一轮** ✗ 已经有一轮在跑时，`clean_session_logs` 不会排队 ✓
+  它直接说明情况、什么都不做 ✓ 正在跑的那一轮以日志为准 ✓
 - **体积字段只保留两位小数** ✗ 小日志的 `beforeMB` / `afterMB` 都是 `0.0`，没有意义 ✓
   它们是给几 MB、几十 MB 的日志用的 ✓
 - **它不能让正在运行的进程把内存吐出来** ✗
