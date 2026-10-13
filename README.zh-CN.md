@@ -323,6 +323,17 @@ npm run test:vacuum
   将来 DSH 改了其中任何一样，结果是 `below-threshold` / `verify-failed` 这类**拒绝**，
   而不是写坏日志 ✓ 这是预期的失败方式，但它仍然是失败 ✗
 
+## 相关插件
+
+同一套东西，三个插件各治一头 —— 都是"会话越跑越长、越贵越慢"这件事：
+
+- **[dsh-history-fold](https://github.com/mili1360/dsh-history-fold)** —— 把可见历史里最老的一段折成
+  一条消息（原文进无损归档），每轮请求带的 token 就降下来 ✓
+  （和本插件不在同一层：那个减的是**发出去的东西**，本插件减的是**存下来的东西**）
+- **[dsh-proactive](https://github.com/mili1360/dsh-proactive)** —— 长任务在 agent 回合结束后才跑完时，
+  把它叫醒主动汇报 ✓
+
+
 ## 许可
 
 MIT，见 [LICENSE](LICENSE)。

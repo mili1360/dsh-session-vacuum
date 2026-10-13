@@ -351,6 +351,19 @@ exits non-zero if anything failed.
   `below-threshold` / `verify-failed` refusals rather than corrupted logs, which is the
   intended failure mode but is still a failure mode.
 
+## Related plugins
+
+Three small DSH plugins, each aimed at one part of the same problem — a session that gets
+expensive and slow the longer it runs:
+
+- **[dsh-history-fold](https://github.com/mili1360/dsh-history-fold)** — folds the oldest part
+  of the visible history into one message backed by a lossless local archive, so each request
+  carries fewer tokens. (Different layer: that one trims what is sent, this one trims what is
+  stored.)
+- **[dsh-proactive](https://github.com/mili1360/dsh-proactive)** — wakes the agent when a long
+  background task finishes after the turn has ended, so it reports back on its own.
+
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
