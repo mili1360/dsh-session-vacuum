@@ -7,19 +7,36 @@
 > **Topics:** `dsh-plugin` · `deepseek-harness` · `session-log` · `streaming-fragments` ·
 > `vacuum` · `prune` · `oom` · `long-session` · `memory-optimization`
 
-A [DSH](https://github.com/deepseek-ai/deepseek-harness) plugin that prunes the **dead
-streaming fragments** out of session logs at startup, so a long session stops expanding into
-gigabytes of objects every time it is loaded.
+Long DSH sessions get slower and heavier the longer they run. Every load expands the log into
+millions of objects, and eventually it OOMs.
 
-- **Inert by default.** A fresh install starts no timer, reads nothing and writes nothing
-  until you configure it.
-- **Dry-run by default.** Even switched on, it only logs what it *would* save until you turn
-  `dryRun` off.
+Hiding the chunks from the client is not enough: the log on disk is still hundreds of MB, so the
+next load rebuilds the same millions of objects and OOMs again. This plugin removes them **at
+rest**, so the load itself gets smaller. The session that motivated it was a 1,813-turn
+conversation — 224,000 rows, 272 MB on disk, 8.43 million objects on load, 1.29 GB resident,
+outcome: OOM.
+
+**You are accumulating this from turn one.** Measured on real sessions, the number of
+prunable fragments tracks output tokens at roughly **0.95–0.99 : 1** — eight sessions, from
+88 fragments for a 91-token one-turn chat up to 1,498 fragments for a 1,516-token six-turn one.
+Nothing reads them; they are write-only.
+
+- **Live by default.** A fresh install prunes idle logs with no configuration at all. Set
+  `enabled: false` to switch it off, or `dryRun: true` to watch without writing.
+- **Never touches a session written in the last 2 minutes** (`liveWindowMs`).
 - **Verified before it writes.** The pruned log has to satisfy the loader contract, or the
   original file is left exactly as it was.
 - **Destructive by design.** The fragment rows are **deleted**. `.orig` is the only backup,
   and it is never removed for you. Read [Destructive by design](#destructive-by-design)
   before enabling it.
+
+**Why not just hide the chunks?** Folding them out of the `session.history` response is a real
+fix for the client, and this plugin does not replace it — the two run together. But the OOM does
+not happen in the client. It happens when DSH loads the log: the file is read, every row is
+parsed, and the chunk rows expand into millions of objects. If the file on disk is still 272 MB,
+skipping them in the response does not stop the next load from rebuilding them. The only way to
+stop that is to make the file smaller — see
+[How this differs from the runtime approaches](#how-this-differs-from-the-runtime-approaches).
 
 ---
 
@@ -45,6 +62,22 @@ Measured on the session that motivated this plugin, a 1,813-turn conversation:
 The file is small enough to sit on disk unnoticed and large enough to kill the process that
 loads it. And because every load pays that cost, the session gets slower and eventually
 unopenable — while the rows that cause it are provably unused.
+
+After a cleanup, on the very same session:
+
+| | before | after |
+|---|---|---|
+| session file | 86.67 MB | 16.99 MB |
+| fragment rows | 169,795 | 0 |
+| non-fragment content | — | **nothing lost** (`dropped=0`) |
+| generation speed shown by the UI | visibly slow | **back to normal** |
+
+> ⚠️ **The "generation speed" row is an observation, not a promise, and it is not explained.** ✗
+> What was observed: after the fragments were removed and load memory dropped, the generation
+> speed reported by the UI recovered. No controlled before/after tok/s reading was taken, so
+> this records the symptom only. Do not read a mechanism into it: context size, cache hit rate,
+> time of day and the reasoning-effort setting were each suspected and each ruled out by data,
+> and this is the only thing that was actually confirmed.
 
 ## What it does
 
@@ -180,6 +213,20 @@ gigabytes → this plugin. A history panel that takes seconds to open → the ru
 > **client** does replay them when it opens a finished conversation — which is exactly why the
 > runtime approaches can drop them without changing what a finished conversation looks like.
 
+## When it runs
+
+It only works on session logs that are **not currently in use**, so collecting a specific
+session is a sequence, not a switch:
+
+1. Switch away from that session — don't just close DSH.
+2. Leave it idle for more than 2 minutes (`liveWindowMs`).
+3. Restart DSH.
+4. About 20 seconds after startup (`startDelayMs`) the plugin sweeps and prunes it.
+5. Next time you open that session it loads smaller, faster, and without the OOM.
+
+A session you are using right now is never touched, and a log below the thresholds is never
+touched either.
+
 ## Install
 
 This is a plugin for a DSH profile. Add it to the profile — the same layer every other DSH
@@ -238,6 +285,28 @@ upstream release. Another version may register its services differently. This pl
 `inject: ['tools']` and uses `ctx.effect`, `ctx.tools.register` (the on-demand tool), and
 optionally `ctx.webServer.register` (the preview route).
 
+### Newer DSH: the v4 session format — supported, with two honest gaps
+
+DSH `0.2.0-rc.2` writes session logs as **`session.v4.jsonl.zstd`** (format **v4**), and v4 has
+**no fragment rows** — the packed delta runs live inside `assistant/message`'s `data.stream`.
+The row-level pruning that works on v0/v1 therefore matched nothing there, and the plugin would
+have loaded cleanly and done nothing at all. That path is now implemented (it compacts the
+runs *inside* the event while the loader's own reader verifies the result), and it was verified
+end-to-end against real sessions in a sandbox: a 5-turn session went 27,715 → 17,071 B, and the
+pruned log still loaded, with **every message byte-identical** after the fold.
+
+What is **not** verified, and you should weigh before relying on it:
+
+- **`assistant/attempt` has no real-data coverage.** The code path is exercised and the verifier
+  refuses any non-equivalent result, but this build only writes that event for a *failed,
+  retried, cancelled or stream-error* attempt — all of the test sessions succeeded, so no real
+  sample exists. Treat it as unit-level assurance, not measured.
+- **The v4 path has no automated regression.** The bundled test suite covers the v0/v1 row
+  format only; v4 is currently held up by the sandbox end-to-end runs described above.
+
+Both gaps are stated so that a silent failure — the exact thing this plugin exists to remove —
+is not hidden behind a green test run.
+
 > **Why `inject` is not optional.** Cordis injects services on demand: a service that is not
 > declared in `inject` does not exist as a property on `ctx`, and reading it throws
 > `cannot get property "tools" without inject`. That is not theory — the first build of this
@@ -281,7 +350,7 @@ file that is not valid JSON, means the defaults below. A missing key also means 
 | `enabled` | `false` | Master switch. `false` ⇒ loaded but completely idle; not even a timer is started. Read once at boot — changing it needs a restart. |
 | `dryRun` | `true` | `true` ⇒ decode, prune and verify in memory, then log `would-vacuum` and write nothing. |
 | `startDelayMs` | `20000` | Milliseconds after boot before the scan starts, so it does not compete with startup. |
-| `liveWindowMs` | `600000` | A log modified more recently than this (10 minutes) counts as live and is `skipped-live`. |
+| `liveWindowMs` | `120000` | A log modified more recently than this (2 minutes) counts as live and is `skipped-live`. |
 | `minChunkRows` | `2000` | Do not touch a log with fewer fragment rows than this. |
 | `minRatio` | `0.25` | Do not touch a log where fragment rows are less than this share of all event rows. |
 | `maxFilesPerRun` | `12` | Cap on files handled per boot, largest first. Files skipped as live or below-threshold do not count against it. |
@@ -328,10 +397,12 @@ with `dryRun: true` gives you the same picture for one session, on demand.
 
 ## Safety model
 
-- **Inert by default.** No config file ⇒ `enabled: false` ⇒ `apply()` returns before creating a
-  timer. Nothing is read, written or logged. The on-demand tool and the web route are inert
-  too: `clean_session_logs` reports that the plugin is disabled instead of scanning, and the
-  route answers 403.
+- **Live by default, and that is deliberate.** `enabled` and `dryRun` both default to the
+  working values, because an install that quietly does nothing is the more common failure: the
+  user concludes the plugin is broken and removes it. To watch first, set `dryRun: true`; to
+  switch it off entirely, set `enabled: false` — then `apply()` returns before creating a timer,
+  nothing is read, written or logged, `clean_session_logs` reports that the plugin is disabled
+  instead of scanning, and the web route answers 403.
 - **The on-demand interface is not a bigger hammer.** It calls the same `runVacuum()` and the
   same `vacuumOne()`, with the same `liveWindowMs` guard and the same thresholds. It cannot
   clean the caller's own session, cannot exceed `maxFilesPerRun`, and the HTTP route cannot

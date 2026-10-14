@@ -209,7 +209,12 @@ function parseRows(file) {
 
 // Baseline config for the cases that must get past the guards. liveWindowMs: 0 makes every
 // file "not live"; the thresholds are lowered so a small synthetic log qualifies.
-const CFG = { ...plugin.DEFAULTS, liveWindowMs: 0, minChunkRows: 20, minRatio: 0.2 }
+//
+// ★ dryRun: true is pinned HERE on purpose. DEFAULTS.dryRun is false (the plugin ships in
+//   "actually do the work" mode), and the two guard cases below assert 'would-vacuum' -- a
+//   status that only exists when dryRun is on. Reading the default instead of pinning it made
+//   those two cases fail while looking like a logic bug. Pin the mode, assert the mode.
+const CFG = { ...plugin.DEFAULTS, liveWindowMs: 0, minChunkRows: 20, minRatio: 0.2, dryRun: true }
 
 const isChunk = (type) => plugin.isChunkRow({ type, data: {} })
 
@@ -1121,6 +1126,48 @@ await test('disposing the plugin disposes both registrations it made', async () 
   fiberDisposer()
   assert.equal(disposedTool, 1, 'the tool registration must be removed on dispose')
   assert.equal(disposedRoute, 1, 'the route registration must be removed on dispose')
+})
+
+// ---------------------------------------------------------------- round-3 additions
+
+await test('readConfig accepts a config.json written with a UTF-8 BOM', async () => {
+  const configFile = path.join(tmp, 'dsh-session-vacuum', 'config.json')
+  // Notepad and PowerShell's `Set-Content -Encoding UTF8` both write a BOM. Before the
+  // fix, JSON.parse threw on the leading U+FEFF and the whole file was silently ignored
+  // (measured on lab2: a config asking for liveWindowMs 30000 behaved as 600000).
+  fs.writeFileSync(configFile, '\uFEFF' + JSON.stringify({ enabled: true, minChunkRows: 123, liveWindowMs: 4567, dryRun: true }))
+  const cfg = plugin.readConfig()
+  assert.equal(cfg.minChunkRows, 123, 'a BOM must not throw the whole config away')
+  assert.equal(cfg.liveWindowMs, 4567, 'every value in a BOM-ed config must still be read')
+  fs.writeFileSync(configFile, JSON.stringify({ enabled: true, startDelayMs: 60000, dryRun: true }))
+})
+
+await test('the log stays pure ASCII and carries a readable relative path', async () => {
+  const root = path.join(tmp, 'sessions')
+  const logFile = path.join(tmp, 'logs', 'session-vacuum.jsonl')
+  const configFile = path.join(tmp, 'dsh-session-vacuum', 'config.json')
+  const { rows } = buildRows()
+  writeLog(path.join(root, 'ascii-check', 'session.jsonl.zstd'), rows, Date.now() - 3600000)
+  fs.rmSync(logFile, { force: true })
+  fs.writeFileSync(configFile, JSON.stringify({
+    enabled: true, startDelayMs: 0, minIntervalMs: 0, minChunkRows: 20, minRatio: 0.2,
+    liveWindowMs: 0, maxFilesPerRun: 12, dryRun: true,
+  }))
+  await plugin.runVacuum()
+
+  // A UTF-8 log read back by a GBK consumer (PowerShell 5.1 Get-Content, cmd type on this
+  // machine) turned a Chinese path into mojibake. Escaping everything above ASCII removes
+  // the whole class: no decoder can change a byte it never has to interpret.
+  const bytes = fs.readFileSync(logFile)
+  assert.ok([...bytes].every((b) => b < 0x80), 'the log file must contain no non-ASCII byte')
+  const fileLine = fs.readFileSync(logFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+    .find((l) => typeof l.rel === 'string' && l.rel.endsWith('ascii-check/session.jsonl.zstd'))
+  assert.ok(fileLine, 'the pass must log the file it handled')
+  assert.equal(fileLine.rel, 'sessions/ascii-check/session.jsonl.zstd', 'and it must carry an ASCII path relative to $DSH_HOME')
+
+  const escaped = plugin.asciiJson({ p: 'E:\\' + '\u5b9e\u673a\u6d4b\u8bd5' + '\\home' })
+  assert.ok([...Buffer.from(escaped)].every((b) => b < 0x80), 'asciiJson must escape every non-ASCII character')
+  assert.equal(JSON.parse(escaped).p, 'E:\\' + '\u5b9e\u673a\u6d4b\u8bd5' + '\\home', 'and JSON.parse must give the real path back')
 })
 
 // ---------------------------------------------------------------- teardown
