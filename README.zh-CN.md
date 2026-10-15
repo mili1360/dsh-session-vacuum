@@ -320,7 +320,7 @@ DSH `0.2.0-rc.2` 把会话日志写成 **`session.v4.jsonl.zstd`**（格式 **v4
 | `dryRun` | `true` | `true` = 解压、剪、自校验全做一遍，然后**只记 `would-vacuum` 不写文件** ✓ |
 | `startDelayMs` | `20000` | 开机后延迟多久才开始扫（毫秒），避开启动高峰 |
 | `liveWindowMs` | `120000` | 多久以内被动过的日志算「正在写」⇒ `skipped-live`（默认 2 分钟） |
-| `minChunkRows` | `2000` | 碎片行数少于它就不动这个文件 |
+| `minChunkRows` | `500` | 碎片行数少于它就不动这个文件 |
 | `minRatio` | `0.25` | 碎片行占全部事件行的比例低于它就不动 |
 | `maxFilesPerRun` | `12` | 每次开机最多处理几个文件（从大到小）✓ `skipped-live` 和 `below-threshold` 的不占额度 |
 | `logFile` | `logs/session-vacuum.jsonl` | 相对 `$DSH_HOME` |

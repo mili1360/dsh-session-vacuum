@@ -351,7 +351,7 @@ file that is not valid JSON, means the defaults below. A missing key also means 
 | `dryRun` | `true` | `true` ⇒ decode, prune and verify in memory, then log `would-vacuum` and write nothing. |
 | `startDelayMs` | `20000` | Milliseconds after boot before the scan starts, so it does not compete with startup. |
 | `liveWindowMs` | `120000` | A log modified more recently than this (2 minutes) counts as live and is `skipped-live`. |
-| `minChunkRows` | `2000` | Do not touch a log with fewer fragment rows than this. |
+| `minChunkRows` | `500` | Do not touch a log with fewer fragment rows than this. |
 | `minRatio` | `0.25` | Do not touch a log where fragment rows are less than this share of all event rows. |
 | `maxFilesPerRun` | `12` | Cap on files handled per boot, largest first. Files skipped as live or below-threshold do not count against it. |
 | `logFile` | `logs/session-vacuum.jsonl` | Relative to `$DSH_HOME`. |
