@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-10-15
+
+### Fixed
+
+- **The npm tarball now ships `test/`.** The `files` field left it out, so the suite was
+  missing from the published package while the README tells a reader to run `npm test` to
+  check the install — an instruction that could not have worked for anyone installing from
+  npm. First release on npm, so 0.2.1 was never published; this ships as 0.2.2 instead of
+  re-pointing an existing tag.
+
 ## [0.2.1] - 2026-10-15
 
 ### Docs
