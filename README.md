@@ -4,22 +4,29 @@
 [![deepseek-harness](https://img.shields.io/badge/deepseek--harness-plugin-4b6bfb)](https://github.com/topics/deepseek-harness)
 [![license: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-> **Topics:** `dsh-plugin` · `deepseek-harness` · `session-log` · `streaming-fragments` ·
-> `vacuum` · `prune` · `oom` · `long-session` · `memory-optimization`
+> **Topics:** `dsh` · `dsh-plugin` · `deepseek-harness` · `session-cleanup` · `session-log` ·
+> `streaming-fragments` · `vacuum` · `prune` · `oom` · `long-session` · `memory-optimization`
 
-Long DSH sessions get slower and heavier the longer they run. Every load expands the log into
-millions of objects, and eventually it OOMs.
+**Is your DSH session getting slower every turn, slower to load, and eventually unopenable — or
+does it just OOM?**
 
-Hiding the chunks from the client is not enough: the log on disk is still hundreds of MB, so the
-next load rebuilds the same millions of objects and OOMs again. This plugin removes them **at
-rest**, so the load itself gets smaller. The session that motivated it was a 1,813-turn
-conversation — 224,000 rows, 272 MB on disk, 8.43 million objects on load, 1.29 GB resident,
-outcome: OOM.
+That is not a feeling. Every token is written twice: the fragments (`assistant/chunk` and the
+packed `text-chunks` / `reasoning-chunks` / `tool-call-chunks` rows) are read by nothing, and
+they pile up. A 1,813-turn conversation reached **272 MB on disk**, expanded into **8.43 million
+objects** when loaded, took **1.29 GB resident**, and died.
 
-**You are accumulating this from turn one.** Measured on real sessions, the number of
-prunable fragments tracks output tokens at roughly **0.95–0.99 : 1** — eight sessions, from
-88 fragments for a 91-token one-turn chat up to 1,498 fragments for a 1,516-token six-turn one.
-Nothing reads them; they are write-only.
+This plugin deletes them **on disk** — not hidden, actually deleted — so the next load is
+smaller before anything else happens. Same session after one pass: **86.67 MB → 16.99 MB**,
+169,795 fragments → 0, and the non-fragment content: **nothing lost** (`dropped=0`).
+
+**You are accumulating this from turn one.** Measured on real sessions, the number of prunable
+fragments tracks output tokens at roughly **0.95–0.99 : 1** — eight sessions, from 88 fragments
+for a 91-token one-turn chat up to 1,498 fragments for a 1,516-token six-turn one. Nothing reads
+them; they are write-only.
+
+**It runs unless you stop it**, but you can look before it touches anything: `dryRun: true`
+records what it *would* do and writes nothing. A pass that cannot verify its own output writes
+nothing at all. The swap is atomic, and `.orig` is never deleted for you.
 
 - **Live by default.** A fresh install prunes idle logs with no configuration at all. Set
   `enabled: false` to switch it off, or `dryRun: true` to watch without writing.

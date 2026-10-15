@@ -15,6 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   npm. First release on npm, so 0.2.1 was never published; this ships as 0.2.2 instead of
   re-pointing an existing tag.
 
+### Docs
+
+- **Both READMEs now open with the symptom, not the mechanism.** The first thing a reader sees
+  is the question they actually arrived with ("is your DSH session getting slower every turn,
+  slower to load, and eventually unopenable — or does it just OOM?"), followed by the numbers
+  that answer it (272 MB / 8.43M objects / 1.29 GB / OOM, then 86.67 MB → 16.99 MB with
+  `dropped=0`) — instead of starting with zstd frames and row types. The topics badge line on
+  both files also carries the two topics added to the repository: `dsh` and `session-cleanup`.
+
 ## [0.2.1] - 2026-10-15
 
 ### Docs

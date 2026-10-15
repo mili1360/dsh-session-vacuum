@@ -4,19 +4,27 @@
 [![deepseek-harness](https://img.shields.io/badge/deepseek--harness-plugin-4b6bfb)](https://github.com/topics/deepseek-harness)
 [![license: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-> **Topics:** `dsh-plugin` · `deepseek-harness` · `session-log` · `streaming-fragments` ·
-> `vacuum` · `prune` · `oom` · `long-session` · `memory-optimization`
+> **Topics:** `dsh` · `dsh-plugin` · `deepseek-harness` · `session-cleanup` · `session-log` ·
+> `streaming-fragments` · `vacuum` · `prune` · `oom` · `long-session` · `memory-optimization`
 
 > 英文主文档见 [README.md](README.md)。代码注释保持中文，本文件是完整的对照说明。
 
-会话越长，DSH 越慢越重 ✗ —— 每次加载都把日志展开成几百万个对象 ✓ 最后直接把内存撑爆 ✓
+**你的 DSH 会话是不是越跑越慢、加载越来越卡、最后打不开甚至 OOM？**
 
-**只把 chunk 从客户端藏起来是不够的** ✗ —— 磁盘上那个文件还是几百 MB ✓ 下次加载照样重建那几百万个对象 ✓ 照样 OOM ✓ 这个插件在**磁盘上**把它们删掉 ✓ 让"加载"这件事本身变小 ✓
-促成它的那个会话是 **1,813 轮** ✓ 22.4 万行 ✓ 磁盘 272 MB ✓ 加载展开 **843 万个对象** ✓ 常驻 1.29 GB ✓ 结果 OOM ✓
+这不是错觉 ✗ —— 每吐一个 token 都会写两遍，那些 streaming fragment **没有任何东西读它们** ✓
+它们只是不停地堆积 ✓ 一个 **1,813 轮**的会话能堆到磁盘 **272 MB** ✓ 加载时展开成 **843 万个对象** ✓
+常驻 **1.29 GB** ✓ 然后直接崩掉 ✓
+
+这个插件在**磁盘层面**把它们删掉 —— **不是隐藏，是真删** ✓ 所以下一次加载本身就变小了 ✓
+同一个会话清理后：**86.67 MB → 16.99 MB** ✓ 169,795 个 fragment 归零 ✓
+非 fragment 内容**一个没丢**（`dropped=0`）✓
 
 **而且你从第一轮起就在攒它** ✗ —— 真会话实测：**可清的片段数 ≈ output token 的 0.95~0.99 倍** ✓
 8 个样本 ✓ 从「1 轮 91 token ⇒ 88 个片段」到「6 轮 1,516 token ⇒ 1,498 个片段」✓
 **没人读它们** ✓ 它们是只写不读的 ✓
+
+**装上就会干活** ✗ —— 你可以先看不动：`dryRun: true` 只记录"本来会删什么"，一个字节都不写 ✓
+自校验不通过就**什么都不写** ✓ 替换是**原子**的 ✓ `.orig` **永不自动删除** ✓
 
 - **装上就干活** ✓ 全新安装无需任何配置就会清理闲置的日志 ✓ 想关就写 `enabled: false` ✓ 想只看不动就写 `dryRun: true` ✓
 - **2 分钟内被动过的会话永远不碰** ✓（`liveWindowMs`）
