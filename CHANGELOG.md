@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Docs
+
+- **The read-path cost of the file size is measured and documented** (both READMEs). Opening or
+  refreshing a conversation pays for decompressing the multi-frame zstd log and parsing every
+  row, and that cost scales with the fragment rows this plugin removes — so it was measured on
+  60 logs that still had their pre-cleanup `.orig` beside them (the same conversation on both
+  sides), decompress + `JSON.parse` of every row, median of 3 runs: **960,042 rows → 300,868**
+  and **62,893 ms → 6,668 ms** across the set, a **median speedup of ×7.77** (a 15,298-row log
+  goes 859 ms → 37 ms; a 6,293-row one goes 331 ms → 18 ms). The section states plainly
+  what it does NOT cover — projection computation and client-side rendering were not measured —
+  so the number cannot be read as a whole-page-refresh promise. Eight pairs were discarded
+  because their `.orig` predates later activity and the two sides were no longer the same
+  conversation length.
+
 ### Added
 
 - **`clean_session_logs`: run a pass on demand.** A Host tool, registered with

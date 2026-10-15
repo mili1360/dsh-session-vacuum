@@ -79,6 +79,30 @@ After a cleanup, on the very same session:
 > time of day and the reasoning-effort setting were each suspected and each ruled out by data,
 > and this is the only thing that was actually confirmed.
 
+### What the file size costs on the read path (measured 2026-10-15)
+
+Opening or refreshing a conversation pays for reading its log: the multi-frame zstd stream is
+decompressed and every row is parsed. That is the server-side cost a page refresh sits on, and
+it scales with the fragment rows this plugin exists to remove — so it was measured directly.
+
+60 logs that still had their pre-cleanup `.orig` beside them, i.e. the **same conversation** on
+both sides, decompress + `JSON.parse` of every row, median of 3 runs each:
+
+| | |
+|---|---|
+| fragment rows across the 60 logs | 960,042 → 300,868 |
+| total read time across the 60 logs | 62,893 ms → 6,668 ms (**9.4×**) |
+| median speedup | **×7.77** (best ×97.5, worst ×0.72) |
+| a 15,298-row log | 859 ms → **37 ms** (×23) |
+| a 6,293-row log | 331 ms → **18 ms** (×18) |
+
+> **Scope, so the number is not over-read** ✗: this measures **the log read** (decompress +
+> parse every row). It does **not** cover projection computation or client-side rendering —
+> neither was measured. The ×0.72 case is a log whose pre-cleanup copy is barely larger than
+> the current one, so it is noise on a small number, not a regression. Eight further pairs were
+> discarded outright because their `.orig` predates later activity, which would have compared
+> two different conversation lengths.
+
 ## What it does
 
 `startDelayMs` after boot, once:
