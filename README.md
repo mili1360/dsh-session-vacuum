@@ -110,7 +110,7 @@ from.
 ## Running it on demand
 
 The boot run has one practical flaw: it skips anything written inside `liveWindowMs`
-(10 minutes by default), which is usually *the session you actually care about*. And until
+(2 minutes by default), which is usually *the session you actually care about*. And until
 this interface existed, the run reported only how many files it handled, so a scan that
 skipped 56 of 58 logs looked identical to a plugin that does nothing.
 
