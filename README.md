@@ -592,3 +592,11 @@ expensive and slow the longer it runs:
 MIT — see [LICENSE](LICENSE).
 
 中文说明见 [README.zh-CN.md](README.zh-CN.md)。
+
+---
+
+**If this fixed a session you were about to give up on, a ★ is what makes the next person find
+it.** That is not a figure of speech here: the plugin directories and GitHub's own search both
+rank by stars, and this repository currently has exactly as many as its author gave it. Bug
+reports and "this did not work on my build" are just as valuable — they are the only reason the
+compatibility section above is worth reading.
