@@ -1,0 +1,41 @@
+name: publish
+
+# Publishes to npm through OIDC (npm's "trusted publishing"): no token, no 2FA prompt.
+# GitHub mints a short-lived identity for this job, npm verifies it against the trusted
+# publisher configured for the package, and the credential expires when the job ends.
+#
+# Requirements, both of which the run below enforces or documents:
+#   - `id-token: write` on the job (without it there is no OIDC token to exchange)
+#   - npm >= 11.5.1 in the runner (OIDC publishing landed there; setup-node ships an older one)
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: npm version
+        run: |
+          npm install -g npm@latest
+          node --version
+          npm --version
+
+      - name: test
+        run: npm test
+
+      - name: publish
+        run: npm publish --access public
