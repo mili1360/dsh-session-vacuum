@@ -260,6 +260,26 @@ touched either.
 
 ## Install
 
+One command, straight from the repository:
+
+```bash
+dsh plugin add --profile web github:mili1360/dsh-session-vacuum
+```
+
+That resolves the package over git, adds it to the profile's `dependencies`, and registers
+the bundle in `dsh.profile.bundles` on its own — verified on `0.2.0-rc.2`. Then **restart
+DSH**: a registered bundle is only picked up at boot.
+
+Works the same way from a local clone, if you would rather build from source:
+
+```bash
+git clone https://github.com/mili1360/dsh-session-vacuum.git
+dsh plugin add --profile web ./dsh-session-vacuum
+```
+
+<details>
+<summary>Doing it by hand instead</summary>
+
 This is a plugin for a DSH profile. Add it to the profile — the same layer every other DSH
 plugin uses.
 
@@ -301,6 +321,8 @@ file, the log file and any `.orig` backups are the only things this plugin creat
 > **Node 22.15 or newer** is required: the plugin uses `zlib.zstdDecompressSync`. On an older
 > runtime it does nothing at all rather than doing something wrong — the decompression call
 > fails, no rows are counted, and every file reports `below-threshold`.
+
+</details>
 
 ## Requirements / compatibility
 
