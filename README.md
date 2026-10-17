@@ -311,14 +311,15 @@ plugin uses.
 
 2. **Restart DSH.** Plugin rows load at boot.
 
-3. Nothing will happen yet — the defaults are inert. Turn it on by writing
-   `~/.dsh/dsh-session-vacuum/config.json`:
+3. **It is already on.** The shipped defaults are `enabled: true` with `dryRun: false`: it
+   boots, waits `startDelayMs`, and collects logs that are past their thresholds. To watch it
+   without letting it write, create `~/.dsh/dsh-session-vacuum/config.json`:
 
    ```json
-   { "enabled": true, "dryRun": true }
+   { "dryRun": true }
    ```
 
-   `enabled` is read once at boot, so this needs a restart. `dryRun: true` then logs what it
+   `enabled` is read once at boot, so changing it needs a restart. `dryRun: true` then logs what it
    *would* remove without writing anything: watch `~/.dsh/logs/session-vacuum.jsonl` until
    the numbers look right, then set `"dryRun": false`.
 
@@ -407,7 +408,7 @@ file that is not valid JSON, means the defaults below. A missing key also means 
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `false` | Master switch. `false` ⇒ loaded but completely idle; not even a timer is started. Read once at boot — changing it needs a restart. |
+| `enabled` | `true` | Master switch. `false` ⇒ loaded but completely idle; not even a timer is started. Read once at boot — changing it needs a restart. |
 | `dryRun` | `true` | `true` ⇒ decode, prune and verify in memory, then log `would-vacuum` and write nothing. |
 | `startDelayMs` | `20000` | Milliseconds after boot before the scan starts, so it does not compete with startup. |
 | `liveWindowMs` | `120000` | A log modified more recently than this (2 minutes) counts as live and is `skipped-live`. |
