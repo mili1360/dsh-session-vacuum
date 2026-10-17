@@ -24,6 +24,13 @@ fragments tracks output tokens at roughly **0.95–0.99 : 1** — eight sessions
 for a 91-token one-turn chat up to 1,498 fragments for a 1,516-token six-turn one. Nothing reads
 them; they are write-only.
 
+**So you do not have to be in trouble yet.** This is a preventive plugin as much as a rescue one:
+install it while the log is still small and the threshold is never crossed. It is not only about
+avoiding the crash, either — measured across 60 sessions, the median **log-read** speedup after a
+pass is **×7.77** (best ×97.5, scope spelled out below), which is exactly the cost a page refresh
+sits on. Below the thresholds it touches nothing, and a session you are using is never touched at
+all. Every DSH session accumulates this; none of them has to be broken first.
+
 **It runs unless you stop it**, but you can look before it touches anything: `dryRun: true`
 records what it *would* do and writes nothing. A pass that cannot verify its own output writes
 nothing at all. The swap is atomic, and `.orig` is never deleted for you.
