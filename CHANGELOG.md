@@ -5,6 +5,35 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-10-18
+
+### Fixed
+
+- **Rewriting a log that a live DSH has loaded corrupts the session.** Measured: the file was
+  renumbered `0..72555` while DSH still held its in-memory sequence counter at `713504`, so the
+  next append wrote `713504` into a file numbered from zero -- one log with two numbering spaces.
+  The `liveWindowMs` guard cannot see this: a session the GUI keeps open but idle simply is not
+  modified, which is indistinguishable from "safe". **"The file did not change" is not
+  "nothing holds it".**
+
+  The plugin now refuses to write from inside a running DSH at all. Every pass reports
+  `skipped-in-process` and writes nothing -- no backup, no temp file, no rename. New default
+  (`allowInProcessWrite: false`).
+
+### Added
+
+- **`lib/clean-cli.mjs` -- the external runner.** `node lib/clean-cli.mjs [--home <DSH_HOME>]
+  [--dry-run] [--file-limit N]` is the one path that may write, because it is the one path that
+  can state DSH is stopped. It sets `preBoot`, the only thing that opens the write path, and
+  prints a per-status summary.
+- Counters and the skip list now separate `skipped-in-process` from `skipped-live`, so a log
+  refused for the new reason is never confused with one refused for being recently written.
+
+### Changed
+
+- `runVacuum()` accepts `preBoot` / `allowInProcessWrite` in its options, so callers other than
+  the CLI can state which world they are in (the tests do this explicitly).
+
 ## [0.2.2] - 2026-10-15
 
 ### Fixed

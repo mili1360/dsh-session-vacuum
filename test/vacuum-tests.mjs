@@ -214,7 +214,12 @@ function parseRows(file) {
 //   "actually do the work" mode), and the two guard cases below assert 'would-vacuum' -- a
 //   status that only exists when dryRun is on. Reading the default instead of pinning it made
 //   those two cases fail while looking like a logic bug. Pin the mode, assert the mode.
-const CFG = { ...plugin.DEFAULTS, liveWindowMs: 0, minChunkRows: 20, minRatio: 0.2, dryRun: true }
+// ★ preBoot: true here models the EXTERNAL runner (lib/clean-cli.mjs). The default config now
+//   refuses to rewrite any log while DSH is alive, because a live DSH holds a sequence counter
+//   for the session it has loaded and a renumbered file desyncs it (measured 2026-10-18).
+//   Tests below exercise the rewriting machinery, so they must claim to be that external run;
+//   the gate itself has its own two cases further down.
+const CFG = { ...plugin.DEFAULTS, preBoot: true, liveWindowMs: 0, minChunkRows: 20, minRatio: 0.2, dryRun: true }
 
 const isChunk = (type) => plugin.isChunkRow({ type, data: {} })
 
@@ -281,7 +286,7 @@ await test('skipped-live: a session modified inside liveWindowMs is left alone',
   writeLog(file, rows, Date.now() - 1000)   // written a second ago
   const before = fs.readFileSync(file)
 
-  const r = plugin.vacuumOne(file, { ...plugin.DEFAULTS, minChunkRows: 20, minRatio: 0.2, dryRun: false })
+  const r = plugin.vacuumOne(file, { ...plugin.DEFAULTS, preBoot: true, minChunkRows: 20, minRatio: 0.2, dryRun: false })
   assert.equal(r.status, 'skipped-live')
   assert.deepEqual(fs.readFileSync(file), before, 'a live session must never be rewritten')
   assert.equal(fs.existsSync(file + '.orig'), false)
@@ -525,6 +530,9 @@ await test('runVacuum scans $DSH_HOME/sessions, honours maxFilesPerRun and logs 
     liveWindowMs: 0,
     maxFilesPerRun: 12,
     dryRun: true,
+    // This block models the external runner (clean-cli.mjs): DSH is stopped, writes are allowed.
+    // The in-process refusal has its own cases elsewhere in this file.
+    preBoot: true,
     ...extra,
   }))
 
@@ -574,6 +582,9 @@ const ON_DEMAND = {
   liveWindowMs: 600000,
   maxFilesPerRun: 12,
   dryRun: false,
+  // Models the EXTERNAL runner. The in-process refusal is covered by its own case below;
+  // these cases are about the mtime guard and the report counters.
+  preBoot: true,
   logFile: 'logs/session-vacuum.jsonl',
 }
 const ON_DEMAND_ROOT = path.join(tmp, 'sessions')
@@ -734,6 +745,31 @@ await test('the on-demand entry point cannot skip the live guard', async () => {
   assert.equal(forStale[0].status, 'skipped-live',
     'a log written seconds ago must be refused even when an agent asks for it by hand')
   assert.deepEqual(fs.readFileSync(staleFile), before, 'and it must not be rewritten')
+})
+
+await test('inside a live DSH, no log is rewritten even when it looks idle', async () => {
+  // The 2026-10-18 incident: a session the GUI keeps open looks idle for two minutes, the mtime
+  // guard said "safe", the file was renumbered 0..72555, and DSH still held seq 713504 -- so the
+  // next append wrote 713504 into a file numbered from zero. Rewriting a log a live DSH has
+  // loaded is never safe, no matter how long it has been quiet.
+  const { rows } = buildRows()
+  const file = path.join(ON_DEMAND_ROOT, 'loaded-by-dsh', 'session.jsonl.zstd')
+  writeLog(file, rows, Date.now() - 3600000) // an hour old: mtime guard would let it through
+  writeOnDemandConfig({ preBoot: false, allowInProcessWrite: false, liveWindowMs: 0 })
+  const before = fs.readFileSync(file)
+  const r = plugin.vacuumOne(file, plugin.readConfig())
+  assert.equal(r.status, 'skipped-in-process', 'in-process runs must refuse before the mtime check')
+  assert.deepEqual(fs.readFileSync(file), before, 'and nothing may be written')
+  assert.equal(fs.existsSync(file + '.orig'), false, 'not even a backup')
+})
+
+await test('the in-process refusal is a config switch, and turning it on restores the old path', async () => {
+  const { rows } = buildRows()
+  const file = path.join(ON_DEMAND_ROOT, 'loaded-by-dsh-2', 'session.jsonl.zstd')
+  writeLog(file, rows, Date.now() - 3600000)
+  writeOnDemandConfig({ preBoot: false, allowInProcessWrite: true, liveWindowMs: 0, dryRun: true })
+  const r = plugin.vacuumOne(file, plugin.readConfig())
+  assert.equal(r.status, 'would-vacuum', 'an explicit opt-in still reaches the rewriting path')
 })
 
 // ---------------------------------------------------------------- frame boundaries
@@ -1152,6 +1188,8 @@ await test('the log stays pure ASCII and carries a readable relative path', asyn
   fs.writeFileSync(configFile, JSON.stringify({
     enabled: true, startDelayMs: 0, minIntervalMs: 0, minChunkRows: 20, minRatio: 0.2,
     liveWindowMs: 0, maxFilesPerRun: 12, dryRun: true,
+    // external-runner mode: this case asserts the log line, not the in-process gate
+    preBoot: true,
   }))
   await plugin.runVacuum()
 

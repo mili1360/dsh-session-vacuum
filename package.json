@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-vacuum",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Prune the dead streaming fragments out of DSH session logs at startup, so a long session stops expanding into gigabytes when it is loaded. Destructive by design; inert and dry-run by default.",
   "keywords": [
     "dsh-plugin",
