@@ -772,6 +772,31 @@ await test('the in-process refusal is a config switch, and turning it on restore
   assert.equal(r.status, 'would-vacuum', 'an explicit opt-in still reaches the rewriting path')
 })
 
+await test('automatic mode: skip what this DSH has loaded, clean what it has not', async () => {
+  // The point of the whole design: a user installs the plugin and it works, with no CLI and no
+  // "stop DSH first" ritual. It can do that because it can tell the two cases apart -- the
+  // session this process loaded (its seq counter lives in memory) versus a dormant session
+  // (DSH will read whatever file it finds the next time it is opened).
+  const seen = []
+  plugin.trackSessions({ on: (ev, fn) => seen.push([ev, fn]) })
+  assert.equal(plugin.isSessionTracking(), true, 'this build can be tracked in tests')
+  for (const [, fn] of seen) fn({ agent: { session: { header: { id: 'session-aaaaaaaa-0000-0000-0000-000000000001' } } } })
+
+  const { rows } = buildRows()
+  const loadedFile = path.join(ON_DEMAND_ROOT, 'session-aaaaaaaa-0000-0000-0000-000000000001', 'session.jsonl.zstd')
+  const dormantFile = path.join(ON_DEMAND_ROOT, 'session-bbbbbbbb-0000-0000-0000-000000000002', 'session.jsonl.zstd')
+  writeLog(loadedFile, rows, Date.now() - 3600000)
+  writeLog(dormantFile, rows, Date.now() - 3600000)
+  writeOnDemandConfig({ preBoot: false, liveWindowMs: 0, dryRun: true })
+
+  const cfg = plugin.readConfig()
+  assert.equal(plugin.vacuumOne(loadedFile, cfg).status, 'skipped-loaded',
+    'the loaded session must be refused even though its file looks idle')
+  assert.equal(plugin.vacuumOne(dormantFile, cfg).status, 'would-vacuum',
+    'a session this process never loaded is safe to rewrite')
+  assert.equal(fs.existsSync(loadedFile + '.orig'), false, 'nothing may be written for the loaded one')
+})
+
 // ---------------------------------------------------------------- frame boundaries
 
 // ---------------------------------------------------------------- the web route

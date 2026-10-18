@@ -265,16 +265,25 @@ session is a sequence, not a switch:
 A session you are using right now is never touched, and a log below the thresholds is never
 touched either.
 
-### The idle window is not enough on its own (2026-10-18)
+### It knows which sessions are in use (2026-10-18)
 
 "Not modified for two minutes" does **not** mean "nothing has it open". A session the GUI keeps
 open but idle is exactly that shape, and rewriting it desyncs DSH: the file was renumbered
 `0..72555` while DSH still held its in-memory counter at `713504`, so the next append wrote
 `713504` into a file numbered from zero. One log, two numbering spaces, a corrupted session.
 
-So the plugin no longer decides this from the file at all. **Inside a live DSH it never rewrites
-anything** — every pass reports `skipped-in-process` and writes nothing, backed up or not. The
-only supported way to actually clean is to run it with DSH **stopped**:
+The fix is not a ritual for you to perform — it is a fact the plugin can establish by itself.
+It listens for `agent/created` / `agent/session-start` and remembers every session **this DSH
+process has loaded**. Those are the dangerous ones, and they are skipped (`skipped-loaded`).
+Anything this process has never loaded is safe to rewrite, because DSH will read whatever file
+it finds the next time that session is opened.
+
+So: **install it, forget it.** It keeps sweeping and it keeps your own working sessions alone.
+`liveWindowMs` remains as a second guard for sessions touched in the last couple of minutes.
+
+If a build cannot dispatch those agent events, the plugin falls back to the strict rule — inside
+a live DSH it writes nothing at all (`skipped-in-process`). And if you want to clean a session
+that is currently open, do it while DSH is stopped:
 
 ```bat
 node lib/clean-cli.mjs --dry-run       :: report what would be rewritten
@@ -282,9 +291,9 @@ node lib/clean-cli.mjs                 :: do it (DSH must be stopped)
 node lib/clean-cli.mjs --home C:\Users\you\.dsh
 ```
 
-That entry point is what "no DSH is running" looks like to the plugin: it sets `preBoot`, which
-is the only thing that opens the write path. `allowInProcessWrite: true` in the config restores
-the old behaviour for anyone who wants to take that risk knowingly.
+That entry point is the one path that can always write: it states "no DSH is running" by setting
+`preBoot`. `allowInProcessWrite: true` disables all of this for anyone who wants the old
+behaviour knowingly.
 
 ## Install
 
