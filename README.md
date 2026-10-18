@@ -281,6 +281,17 @@ it finds the next time that session is opened.
 So: **install it, forget it.** It keeps sweeping and it keeps your own working sessions alone.
 `liveWindowMs` remains as a second guard for sessions touched in the last couple of minutes.
 
+### The one moment a restart can clean is now used (2026-10-18)
+
+The sweep used to start `startDelayMs` (20 s) after boot, by which time the GUI has usually
+reopened the session you were last using — so the session a user most wants cleaned was the one
+always skipped. It now sweeps **immediately, from `apply()`, before anything connects**: at that
+instant no session is loaded, so a recently-modified file only means "this was the last write
+before shutdown", not "someone is using it". The delayed pass stays as a second sweep.
+
+Measured in the sandbox: `beforeMB 85.56 -> afterMB 16.81, chunks 167029, kept 57999`, `.orig`
+kept. That is the restart doing the cleanup, with no CLI and no waiting.
+
 If a build cannot dispatch those agent events, the plugin falls back to the strict rule — inside
 a live DSH it writes nothing at all (`skipped-in-process`). And if you want to clean a session
 that is currently open, do it while DSH is stopped:

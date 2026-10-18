@@ -1233,8 +1233,32 @@ await test('the log stays pure ASCII and carries a readable relative path', asyn
   assert.equal(JSON.parse(escaped).p, 'E:\\' + '\u5b9e\u673a\u6d4b\u8bd5' + '\\home', 'and JSON.parse must give the real path back')
 })
 
+await test('the boot window is what lets a restart clean the session you were just using', async () => {
+  // The immediate sweep from apply() runs before the GUI connects, so a file modified a minute
+  // ago is NOT "in use" -- it is just the last write before shutdown. Without this, the only
+  // session a user ever wants cleaned is always the one that gets skipped. Verified in the
+  // sandbox on 2026-10-18: the boot sweep rewrote an 85.56 MB log to 16.81 MB, .orig kept.
+  const { rows } = buildRows()
+  const file = path.join(ON_DEMAND_ROOT, 'session-cccccccc-0000-0000-0000-000000000003', 'session.jsonl.zstd')
+  writeLog(file, rows, Date.now() - 60000) // one minute old: still "live" under the normal window
+  writeOnDemandConfig({ preBoot: false, allowInProcessWrite: false, liveWindowMs: 600000, dryRun: true })
+
+  const normal = plugin.vacuumOne(file, plugin.readConfig())
+  assert.equal(normal.status, 'skipped-live', 'outside the boot window a recent write still refuses')
+
+  const boot = plugin.vacuumOne(file, { ...plugin.readConfig(), bootWindow: true })
+  assert.equal(boot.status, 'would-vacuum', 'inside the boot window it is eligible again')
+
+  // ...but never for a session this process already loaded, boot window or not.
+  plugin.loadedSessions.add('session-cccccccc-0000-0000-0000-000000000003')
+  const guarded = plugin.vacuumOne(file, { ...plugin.readConfig(), bootWindow: true })
+  assert.equal(guarded.status, 'skipped-loaded', 'loaded wins over the boot window')
+  plugin.loadedSessions.delete('session-cccccccc-0000-0000-0000-000000000003')
+})
+
 // ---------------------------------------------------------------- teardown
 
 fs.rmSync(tmp, { recursive: true, force: true })
 console.log('\n' + passed + ' passed, ' + failed + ' failed')
 process.exit(failed === 0 ? 0 : 1)
+
