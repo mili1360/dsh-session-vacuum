@@ -1,4 +1,4 @@
-// Offline tests for dsh-session-vacuum: chunk-row detection, the two thresholds, the
+﻿// Offline tests for dsh-session-vacuum: chunk-row detection, the two thresholds, the
 // live-file guard, the prune, the self-verify, and the atomic replace.
 //
 // Nothing here touches a running DSH or the real DSH_HOME. DSH_HOME is pointed at a
@@ -19,6 +19,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'session-vacuum-test-'))
 // Set BEFORE the plugin is imported: readConfig(), logLine() and runVacuum() all resolve
 // their paths through dshHome(), and every case below writes only under this directory.
 process.env.DSH_HOME = tmp
+process.env.DSH_VACUUM_SKIP_DSH_CHECK = '1'
 fs.mkdirSync(path.join(tmp, 'dsh-session-vacuum'), { recursive: true })
 
 const plugin = await import('../lib/index.js')
@@ -1254,6 +1255,48 @@ await test('the boot window is what lets a restart clean the session you were ju
   const guarded = plugin.vacuumOne(file, { ...plugin.readConfig(), bootWindow: true })
   assert.equal(guarded.status, 'skipped-loaded', 'loaded wins over the boot window')
   plugin.loadedSessions.delete('session-cccccccc-0000-0000-0000-000000000003')
+})
+
+// ---------------------------------------------------------------- 2026-10-30 audit backfill
+//
+// The report's core finding: 15 real runs had dropped:0 fourteen times, so the one path that
+// actually destroys data -- "a row IS dropped and something references it" -- had never been
+// exercised. These cases pin the refusals so that path cannot regress silently.
+
+await test('prune refuses the fold when a dropped row is still cited by another event', async () => {
+  const header = { type: 'session', id: 'session-refuse-0001', version: 1 }
+  const rows = [
+    header,
+    // A surface event WITHOUT a surfaceOp marker: dropIllegal deletes it.
+    { type: 'user/message', data: { message: { id: 'victim', role: 'user', content: [] } } },
+    // An event that cites the one about to be dropped: its reference cannot survive.
+    {
+      type: 'tool/result',
+      surfaceOp: 'append',
+      sourceEventSeqs: [1],
+      data: { message: { id: 'citer', role: 'assistant', content: [] } },
+    },
+  ]
+  const pruned = plugin.pruneRows(rows)
+  assert.equal(pruned.refused, true, 'losing a cited row must refuse the fold')
+  assert.equal(pruned.reason, 'remap-lost-references')
+  assert.ok(pruned.problemCount > 0, 'the refusal must say how many references broke')
+})
+
+await test('verifyPruned rejects an empty sourceEventSeqs on a non-assistant event', async () => {
+  const pruned = {
+    header: { type: 'session', id: 'session-verify-0001', version: 1 },
+    events: [
+      { seq: 0, type: 'user/message', surfaceOp: 'append', data: {} },
+      // tool/result with an EMPTY citation list: the exact wound B2 produced 1811 times.
+      { seq: 1, type: 'tool/result', surfaceOp: 'append', sourceEventSeqs: [], data: {} },
+    ],
+  }
+  const problems = plugin.verifyPruned(pruned)
+  assert.ok(
+    problems.some((p) => p.includes('sourceEventSeqs is empty')),
+    'an empty citation list on a non-assistant event must be reported',
+  )
 })
 
 // ---------------------------------------------------------------- teardown
